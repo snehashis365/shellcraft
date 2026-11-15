@@ -20,10 +20,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -31,6 +30,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 
 private const val TAG = "LlmPluginAnalyzer"
@@ -40,6 +42,7 @@ class LlmPluginAnalyzer {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
+        coerceInputValues = true
         encodeDefaults = true
     }
 
@@ -88,14 +91,22 @@ class LlmPluginAnalyzer {
         commandName: String,
         rawDocs: String,
         remoteOsHint: String,
-        config: LlmBackendConfig
+        config: LlmBackendConfig,
+        onProgress: ((String) -> Unit)? = null
     ): CliPlugin {
-        val timeoutMs = (config.timeoutSeconds.coerceIn(15, 180)) * 1000L
+        val timeoutSec = config.timeoutSeconds.coerceIn(30, 600)
+        val timeoutMs = timeoutSec * 1000L
         val prompt = buildPrompt(commandName, rawDocs, remoteOsHint)
         return when (config.providerType) {
-            LlmProviderType.FIREBASE_GEMINI -> analyzeWithFirebaseGemini(commandName, prompt, config.geminiModel, timeoutMs)
-            LlmProviderType.OLLAMA_LOCAL -> analyzeWithOllama(commandName, prompt, config, timeoutMs)
-            LlmProviderType.OPENAI_COMPATIBLE -> analyzeWithOpenAiCompatible(commandName, prompt, config, timeoutMs)
+            LlmProviderType.FIREBASE_GEMINI -> analyzeWithFirebaseGemini(
+                commandName, prompt, config.geminiModel, timeoutMs
+            )
+            LlmProviderType.OLLAMA_LOCAL -> analyzeWithOllamaStream(
+                commandName, prompt, config, timeoutSec, timeoutMs, onProgress
+            )
+            LlmProviderType.OPENAI_COMPATIBLE -> analyzeWithOpenAiCompatibleStream(
+                commandName, prompt, config, timeoutSec, timeoutMs, onProgress
+            )
         }
     }
 
@@ -109,7 +120,7 @@ class LlmPluginAnalyzer {
                 "Firebase AI Logic (${config.geminiModel}) ready: ${response.text?.trim() ?: "OK"}"
             }
             LlmProviderType.OLLAMA_LOCAL -> {
-                val baseUrl = config.customEndpointUrl.trimEnd('/')
+                val baseUrl = config.customEndpointUrl.trim().trimEnd('/')
                 require(baseUrl.startsWith("http")) { "Ollama endpoint must start with http:// or https://" }
                 val client = buildHttpClient(20)
                 val req = Request.Builder().url("$baseUrl/api/tags").get().build()
@@ -122,11 +133,16 @@ class LlmPluginAnalyzer {
                 }
             }
             LlmProviderType.OPENAI_COMPATIBLE -> {
-                val baseUrl = config.customEndpointUrl.trimEnd('/')
+                val baseUrl = config.customEndpointUrl.trim().trimEnd('/')
                 require(baseUrl.startsWith("http")) { "Endpoint URL must start with http:// or https://" }
+                val modelsUrl = if (baseUrl.endsWith("/v1") || baseUrl.endsWith("/openai")) {
+                    "$baseUrl/models"
+                } else {
+                    "$baseUrl/v1/models"
+                }
                 val client = buildHttpClient(20)
                 val apiKey = SecretCipher.decrypt(config.encryptedApiKey)
-                val reqBuilder = Request.Builder().url("$baseUrl/v1/models").get()
+                val reqBuilder = Request.Builder().url(modelsUrl).get()
                 if (apiKey.isNotBlank()) reqBuilder.header("Authorization", "Bearer $apiKey")
                 client.newCall(reqBuilder.build()).execute().use { resp ->
                     if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
@@ -163,27 +179,37 @@ class LlmPluginAnalyzer {
             return parseGeneratedPluginJson(commandName, rawJson)
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Firebase AI generation timed out", e)
-            throw IllegalStateException("LLM analysis timed out after ${timeoutMs / 1000}s. Try a smaller doc snippet or faster model.")
+            throw IllegalStateException("Gemini analysis timed out after ${timeoutMs / 1000}s.")
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Firebase AI generation failed", e)
-            throw IllegalStateException(e.localizedMessage ?: "Firebase AI Logic generation failed.", e)
+            val detail = e.localizedMessage ?: "Firebase AI Logic generation failed."
+            val hint = if (detail.contains("403") || detail.contains("App Check", ignoreCase = true) ||
+                detail.contains("attestation", ignoreCase = true)
+            ) {
+                " (Firebase App Check rejected the phone's unregistered debug token. Use the AI Studio emulator, register your debug token in Firebase Console, or switch to an OpenAI-compatible/Ollama endpoint in Settings.)"
+            } else {
+                ""
+            }
+            throw IllegalStateException("$detail$hint", e)
         }
     }
 
-    private suspend fun analyzeWithOllama(
+    private suspend fun analyzeWithOllamaStream(
         commandName: String,
         prompt: String,
         config: LlmBackendConfig,
-        timeoutMs: Long
+        timeoutSec: Int,
+        timeoutMs: Long,
+        onProgress: ((String) -> Unit)?
     ): CliPlugin = withContext(Dispatchers.IO) {
-        val baseUrl = config.customEndpointUrl.trimEnd('/')
+        val baseUrl = config.customEndpointUrl.trim().trimEnd('/')
         require(baseUrl.startsWith("http")) { "Configure a valid Ollama HTTP endpoint in Settings." }
-        val client = buildHttpClient((timeoutMs / 1000).toInt())
+        val client = buildHttpClient(timeoutSec)
         val payload = OllamaChatRequest(
             model = config.customModelName.ifBlank { "qwen2.5-coder:7b" },
-            stream = false,
+            stream = true,
             format = "json",
             messages = listOf(
                 ChatMsg("system", SYSTEM_JSON_INSTRUCTIONS),
@@ -192,75 +218,158 @@ class LlmPluginAnalyzer {
         )
         val body = json.encodeToString(payload).toRequestBody("application/json".toMediaType())
         val req = Request.Builder().url("$baseUrl/api/chat").post(body).build()
-        val respText = withTimeout(timeoutMs) {
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    throw IllegalStateException("Ollama error HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+
+        val contentBuilder = StringBuilder()
+        var reasoningChars = 0
+
+        try {
+            withTimeout(timeoutMs) {
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IllegalStateException("Ollama error HTTP ${resp.code}: ${resp.body?.string()?.take(240)}")
+                    }
+                    val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty Ollama response stream")
+                    BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { reader ->
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            if (line.isBlank()) continue
+                            val chunk = runCatching { json.parseToJsonElement(line).jsonObject }.getOrNull() ?: continue
+                            val msg = chunk["message"]?.jsonObject
+                            val token = runCatching { msg?.get("content")?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty()
+                            val thinking = runCatching { msg?.get("thinking")?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty()
+                            if (thinking.isNotEmpty()) {
+                                reasoningChars += thinking.length
+                                onProgress?.invoke("Reasoning locally ($reasoningChars chars)...")
+                            }
+                            if (token.isNotEmpty()) {
+                                contentBuilder.append(token)
+                                onProgress?.invoke("Generating plugin JSON (${contentBuilder.length} chars)...")
+                            }
+                        }
+                    }
                 }
-                resp.body?.string() ?: throw IllegalStateException("Empty Ollama response")
             }
+        } catch (e: TimeoutCancellationException) {
+            throw IllegalStateException("Local Ollama generation timed out after ${timeoutSec}s. You can raise the timeout in Settings.")
         }
-        val root = json.parseToJsonElement(respText).jsonObject
-        val content = root["message"]?.jsonObject?.get("content")?.jsonPrimitive?.content
-            ?: throw IllegalStateException("Malformed Ollama response JSON")
-        parseGeneratedPluginJson(commandName, extractJsonObject(content))
+
+        val finalContent = contentBuilder.toString()
+        if (finalContent.isBlank()) {
+            throw IllegalStateException("Ollama finished without emitting JSON content.")
+        }
+        parseGeneratedPluginJson(commandName, extractJsonObject(finalContent))
     }
 
-    private suspend fun analyzeWithOpenAiCompatible(
+    private suspend fun analyzeWithOpenAiCompatibleStream(
         commandName: String,
         prompt: String,
         config: LlmBackendConfig,
-        timeoutMs: Long
+        timeoutSec: Int,
+        timeoutMs: Long,
+        onProgress: ((String) -> Unit)?
     ): CliPlugin = withContext(Dispatchers.IO) {
-        val baseUrl = config.customEndpointUrl.trimEnd('/')
+        val baseUrl = config.customEndpointUrl.trim().trimEnd('/')
         require(baseUrl.startsWith("http")) { "Configure a valid OpenAI-compatible HTTP endpoint in Settings." }
-        val client = buildHttpClient((timeoutMs / 1000).toInt())
+        val completionsUrl = if (baseUrl.endsWith("/v1") || baseUrl.endsWith("/openai")) {
+            "$baseUrl/chat/completions"
+        } else {
+            "$baseUrl/v1/chat/completions"
+        }
+        val client = buildHttpClient(timeoutSec)
         val apiKey = SecretCipher.decrypt(config.encryptedApiKey)
         val payload = OpenAiChatRequest(
             model = config.customModelName.ifBlank { "gpt-4o-mini" },
             temperature = 0.1,
+            stream = true,
             messages = listOf(
                 ChatMsg("system", SYSTEM_JSON_INSTRUCTIONS),
                 ChatMsg("user", prompt)
             )
         )
         val body = json.encodeToString(payload).toRequestBody("application/json".toMediaType())
-        val reqBuilder = Request.Builder().url("$baseUrl/v1/chat/completions").post(body)
+        val reqBuilder = Request.Builder().url(completionsUrl).post(body)
         if (apiKey.isNotBlank()) {
             reqBuilder.header("Authorization", "Bearer $apiKey")
         }
-        val respText = withTimeout(timeoutMs) {
-            client.newCall(reqBuilder.build()).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    throw IllegalStateException("Provider error HTTP ${resp.code}: ${resp.body?.string()?.take(200)}")
+
+        val contentBuilder = StringBuilder()
+        var reasoningChars = 0
+
+        try {
+            withTimeout(timeoutMs) {
+                client.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        throw IllegalStateException("Provider error HTTP ${resp.code}: ${resp.body?.string()?.take(240)}")
+                    }
+                    val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty provider stream")
+                    BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { reader ->
+                        while (true) {
+                            val rawLine = reader.readLine() ?: break
+                            val line = rawLine.trim()
+                            if (line.isEmpty() || !line.startsWith("data:")) continue
+                            val data = line.removePrefix("data:").trim()
+                            if (data == "[DONE]") break
+                            val root = runCatching { json.parseToJsonElement(data).jsonObject }.getOrNull() ?: continue
+                            val delta = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                                ?.get("delta")?.jsonObject ?: continue
+                            val reasoning = runCatching { delta["reasoning_content"]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty()
+                            val content = runCatching { delta["content"]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty()
+                            if (reasoning.isNotEmpty()) {
+                                reasoningChars += reasoning.length
+                                onProgress?.invoke("Model reasoning ($reasoningChars chars)...")
+                            }
+                            if (content.isNotEmpty()) {
+                                contentBuilder.append(content)
+                                onProgress?.invoke("Streaming JSON (${contentBuilder.length} chars)...")
+                            }
+                        }
+                    }
                 }
-                resp.body?.string() ?: throw IllegalStateException("Empty provider response")
             }
+        } catch (e: TimeoutCancellationException) {
+            throw IllegalStateException("Local/Custom LLM timed out after ${timeoutSec}s (reasoning reached $reasoningChars chars). Increase Timeout in Settings or pick a faster model.")
         }
-        val root = json.parseToJsonElement(respText).jsonObject
-        val content = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
-            ?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.content
-            ?: throw IllegalStateException("Malformed OpenAI-compatible response JSON")
-        parseGeneratedPluginJson(commandName, extractJsonObject(content))
+
+        val finalContent = contentBuilder.toString()
+        if (finalContent.isBlank()) {
+            throw IllegalStateException("LLM finished reasoning ($reasoningChars chars) without emitting JSON content.")
+        }
+        parseGeneratedPluginJson(commandName, extractJsonObject(finalContent))
     }
 
     private fun parseGeneratedPluginJson(commandName: String, rawJson: String): CliPlugin {
         val dto = json.decodeFromString<GeneratedPluginDto>(rawJson)
         val cleanCmd = dto.commandName.ifBlank { commandName }.trim()
         val actions = dto.actions.mapIndexed { index, actionDto ->
+            val rawSub = actionDto.subcommand.trim()
+            val cleanedSub = when {
+                rawSub.equals(cleanCmd, ignoreCase = true) -> ""
+                rawSub.startsWith("$cleanCmd ", ignoreCase = true) -> rawSub.drop(cleanCmd.length).trim()
+                else -> rawSub
+            }
             PluginAction(
                 id = actionDto.id.ifBlank { "action_$index" },
                 label = actionDto.label.ifBlank { "Run" },
                 description = actionDto.description,
-                subcommand = actionDto.subcommand,
+                subcommand = cleanedSub,
                 riskLevel = runCatching { RiskLevel.valueOf(actionDto.riskLevel.uppercase()) }.getOrDefault(RiskLevel.MODERATE),
                 requiresSudo = actionDto.requiresSudo,
                 parameters = actionDto.parameters.mapIndexed { pIdx, p ->
+                    val mappedType = when (p.type.uppercase()) {
+                        "STRING", "HOST", "TEXT" -> ParameterType.TEXT
+                        "INT", "INTEGER", "FLOAT", "NUMBER" -> ParameterType.NUMBER
+                        "BOOL", "BOOLEAN", "FLAG", "BOOLEAN_FLAG" -> ParameterType.BOOLEAN_FLAG
+                        "ENUM", "SELECT", "SELECT_ENUM" -> ParameterType.SELECT_ENUM
+                        "PATH", "FILE", "DIR" -> ParameterType.PATH
+                        "PORT" -> ParameterType.PORT
+                        "KEY_VALUE", "KV" -> ParameterType.KEY_VALUE
+                        else -> ParameterType.TEXT
+                    }
                     PluginParameter(
                         id = p.id.ifBlank { "param_$pIdx" },
                         label = p.label.ifBlank { p.id },
                         description = p.description,
-                        type = runCatching { ParameterType.valueOf(p.type.uppercase()) }.getOrDefault(ParameterType.TEXT),
+                        type = mappedType,
                         flag = p.flag?.takeIf { it.isNotBlank() },
                         positionalIndex = p.positionalIndex,
                         required = p.required,
@@ -290,6 +399,13 @@ class LlmPluginAnalyzer {
             )
         }
 
+        val mappedOs = when (dto.targetOs.uppercase()) {
+            "DARWIN", "MAC", "MACOS" -> TargetOs.MACOS
+            "LINUX" -> TargetOs.LINUX
+            "WINDOWS", "WINDOWS_POSIX" -> TargetOs.WINDOWS_POSIX
+            else -> TargetOs.POSIX
+        }
+
         return CliPlugin(
             schemaVersion = "shellcraft.plugin.v1",
             id = "ai-${cleanCmd.lowercase().replace(Regex("[^a-z0-9_-]"), "-")}-${System.currentTimeMillis()}",
@@ -297,7 +413,7 @@ class LlmPluginAnalyzer {
             displayName = dto.displayName.ifBlank { cleanCmd },
             description = dto.description.ifBlank { "AI-generated GUI plugin for $cleanCmd" },
             category = dto.category.ifBlank { "System" },
-            targetOs = runCatching { TargetOs.valueOf(dto.targetOs.uppercase()) }.getOrDefault(TargetOs.POSIX),
+            targetOs = mappedOs,
             version = "1.0.0",
             author = "ShellCraft AI",
             source = PluginSource.AI_GENERATED,
@@ -319,19 +435,23 @@ class LlmPluginAnalyzer {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .callTimeout(timeoutSeconds.toLong(), TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
             .build()
 
     private fun buildPrompt(commandName: String, rawDocs: String, remoteOsHint: String): String = """
 Analyze the following CLI documentation (man page / --help / usage output) for the command `$commandName` on target environment `$remoteOsHint`.
-Generate a structured, ergonomic GUI plugin specification (`shellcraft.plugin.v1`) with 2 to 6 practical actions ordered from safest/most common read-only inspection actions to mutating/administrative actions.
+Generate a structured, ergonomic GUI plugin specification (`shellcraft.plugin.v1`) with 2 to 5 practical actions ordered from safest/most common read-only inspection actions to mutating/administrative actions.
 
 Rules:
+- `subcommand` must ONLY contain subcommands (or `""` if the command takes flags directly). Never repeat `$commandName` inside `subcommand`.
+- Parameter `type` MUST be strictly one of: `TEXT`, `NUMBER`, `BOOLEAN_FLAG`, `SELECT_ENUM`, `PATH`, `PORT`, `KEY_VALUE`.
 - Map boolean flags (e.g. `-a`, `--verbose`, `--dry-run`, `--json`) to `BOOLEAN_FLAG` with `"true"` or `"false"` defaultValue.
 - Map enumerated options to `SELECT_ENUM` with explicit `options` list.
 - Map numeric counts/lines/timeouts to `NUMBER`, ports to `PORT`, file/directory paths to `PATH`.
-- Set `riskLevel` accurately: `SAFE` for read-only inspection/status/list; `MODERATE` for reversible writes/restarts/sync; `HIGH` for destructive delete/prune/stop/kill/firewall changes; `CRITICAL` for disk format/poweroff/kernel/system-wide wipe.
-- Set `requiresSudo = true` ONLY when the command genuinely needs root privileges on POSIX systems.
+- Set `riskLevel` accurately: `SAFE`, `MODERATE`, `HIGH`, or `CRITICAL`.
+- Set `requiresSudo = true` ONLY when root privileges are genuinely required.
+- Keep your thinking concise and output valid JSON immediately.
 
 CLI Documentation:
 ${rawDocs.take(12_000)}
@@ -357,6 +477,7 @@ ${rawDocs.take(12_000)}
     private data class OpenAiChatRequest(
         val model: String,
         val temperature: Double,
+        val stream: Boolean,
         val messages: List<ChatMsg>
     )
 

@@ -15,7 +15,7 @@ data class LlmBackendConfig(
     val customEndpointUrl: String = "http://192.168.1.100:11434",
     val customModelName: String = "qwen2.5-coder:7b",
     val encryptedApiKey: String = "",
-    val timeoutSeconds: Int = 60
+    val timeoutSeconds: Int = 240
 )
 
 enum class PluginAnalysisSource {

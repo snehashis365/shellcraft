@@ -35,7 +35,10 @@ sealed interface SshConnectionState {
     data class Connecting(val hostLabel: String) : SshConnectionState
     data class Connected(
         val host: SshHostProfile,
-        val env: RemoteEnvironmentInfo
+        val env: RemoteEnvironmentInfo,
+        val latencyMs: Long? = null,
+        val lastHeartbeatAtMs: Long = System.currentTimeMillis(),
+        val isHealthy: Boolean = true
     ) : SshConnectionState
     data class Error(val message: String) : SshConnectionState
 }

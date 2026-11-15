@@ -75,6 +75,7 @@ fun SettingsScreen(
     var customEndpoint by remember(llmConfig) { mutableStateOf(llmConfig.customEndpointUrl) }
     var customModel by remember(llmConfig) { mutableStateOf(llmConfig.customModelName) }
     var customApiKey by remember { mutableStateOf("") }
+    var timeoutSeconds by remember(llmConfig) { mutableStateOf(llmConfig.timeoutSeconds) }
     var llmTestResult by remember { mutableStateOf<String?>(null) }
     var isTestingLlm by remember { mutableStateOf(false) }
 
@@ -90,6 +91,7 @@ fun SettingsScreen(
         geminiModel = llmConfig.geminiModel
         customEndpoint = llmConfig.customEndpointUrl
         customModel = llmConfig.customModelName
+        timeoutSeconds = llmConfig.timeoutSeconds
     }
 
     Box(
@@ -167,7 +169,7 @@ fun SettingsScreen(
                                 }
                             }
                             Text(
-                                text = "Powered by Firebase AI Logic with App Check attestation (no API key required).",
+                                text = "Uses Firebase AI Logic with App Check attestation (no API key). Note: Sideloaded debug APKs on a physical phone require registering your phone's Logcat App Check debug secret in Firebase Console, or using OpenAI-Compatible mode.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -179,7 +181,7 @@ fun SettingsScreen(
                                 placeholder = {
                                     Text(
                                         if (providerType == LlmProviderType.OLLAMA_LOCAL) "http://192.168.1.100:11434"
-                                        else "https://api.openai.com"
+                                        else "http://192.168.1.100:1234"
                                     )
                                 },
                                 singleLine = true,
@@ -189,7 +191,7 @@ fun SettingsScreen(
                                 value = customModel,
                                 onValueChange = { customModel = it },
                                 label = { Text("Model Name") },
-                                placeholder = { Text("qwen2.5-coder:7b") },
+                                placeholder = { Text("qwen/qwen3.6-35b-a3b") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth().testTag("llm_model_input")
                             )
@@ -199,13 +201,28 @@ fun SettingsScreen(
                                     onValueChange = { customApiKey = it },
                                     label = {
                                         Text(
-                                            if (llmConfig.encryptedApiKey.isBlank()) "API Key (optional for local vLLM)"
+                                            if (llmConfig.encryptedApiKey.isBlank()) "API Key (optional for LM Studio / vLLM)"
                                             else "New API Key (leave blank to keep existing)"
                                         )
                                     },
                                     visualTransformation = PasswordVisualTransformation(),
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth().testTag("llm_apikey_input")
+                                )
+                            }
+                        }
+
+                        Text("Request Timeout (for reasoning/large local models)", style = MaterialTheme.typography.labelLarge)
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(60, 180, 300, 480).forEach { sec ->
+                                FilterChip(
+                                    selected = timeoutSeconds == sec,
+                                    onClick = { timeoutSeconds = sec },
+                                    label = { Text("${sec}s") },
+                                    modifier = Modifier.testTag("timeout_chip_$sec")
                                 )
                             }
                         }
@@ -232,7 +249,8 @@ fun SettingsScreen(
                                             SecretCipher.encrypt(customApiKey)
                                         } else {
                                             llmConfig.encryptedApiKey
-                                        }
+                                        },
+                                        timeoutSeconds = timeoutSeconds
                                     )
                                     scope.launch {
                                         val res = onTestLlmConfig(candidate)
@@ -262,7 +280,7 @@ fun SettingsScreen(
                                         customEndpoint,
                                         customModel,
                                         customApiKey.takeIf { it.isNotBlank() },
-                                        60
+                                        timeoutSeconds
                                     )
                                 },
                                 modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("save_llm_button")

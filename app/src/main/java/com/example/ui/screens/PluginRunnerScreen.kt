@@ -1,6 +1,12 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,19 +29,22 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,6 +55,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -55,10 +65,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.CliPlugin
 import com.example.domain.model.GitHubRepoConfig
@@ -68,10 +81,16 @@ import com.example.domain.model.PluginCommandBuilder
 import com.example.domain.model.PluginParameter
 import com.example.domain.model.PluginSource
 import com.example.domain.model.RiskLevel
+import com.example.ui.TerminalSessionState
 import com.example.ui.components.CommandPreviewBox
+import com.example.ui.components.GlowSurfaceCard
+import com.example.ui.components.InteractiveStdinPanel
+import com.example.ui.components.RichCommandOutputView
 import com.example.ui.components.RiskBadge
 import com.example.ui.components.SourceChip
 import com.example.ui.components.riskColor
+import com.example.ui.components.springPressScale
+import com.example.ui.theme.JetBrainsMonoFontFamily
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -79,8 +98,12 @@ fun PluginRunnerScreen(
     plugin: CliPlugin,
     githubConfig: GitHubRepoConfig,
     isSshConnected: Boolean,
+    terminalState: TerminalSessionState,
     onBack: () -> Unit,
     onExecute: (command: String, action: PluginAction, elevateSudo: Boolean) -> Unit,
+    onSendInput: (text: String, isSecret: Boolean) -> Unit,
+    onSendControl: (ctrlByte: Int, label: String) -> Unit,
+    onExpandTerminal: () -> Unit,
     onPublishToGitHub: (CliPlugin) -> Unit,
     onExportJson: (CliPlugin) -> String,
     onDeletePlugin: (String) -> Unit,
@@ -117,6 +140,9 @@ fun PluginRunnerScreen(
         selectedAction?.parameters?.filter { it.required && paramValues[it.id].isNullOrBlank() }.orEmpty()
     }
 
+    val showInlineOutput = terminalState.pluginId == plugin.id &&
+        (terminalState.isRunning || terminalState.output.isNotBlank() || !terminalState.errorMessage.isNullOrBlank())
+
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -139,6 +165,7 @@ fun PluginRunnerScreen(
                 actions = {
                     IconButton(
                         onClick = {
+                            onHapticTick()
                             clipboard.setText(AnnotatedString(onExportJson(plugin)))
                             onNotify("Copied ${plugin.commandName}.json manifest")
                         },
@@ -148,7 +175,10 @@ fun PluginRunnerScreen(
                     }
                     if (githubConfig.isConfigured) {
                         IconButton(
-                            onClick = { onPublishToGitHub(plugin) },
+                            onClick = {
+                                onHapticTick()
+                                onPublishToGitHub(plugin)
+                            },
                             modifier = Modifier.testTag("publish_github_button")
                         ) {
                             Icon(Icons.Filled.CloudUpload, contentDescription = "Publish plugin to GitHub")
@@ -203,68 +233,112 @@ fun PluginRunnerScreen(
                     }
                 }
 
+                // Rich Interactive Action Cards Carousel
                 item {
-                    Text("Action", style = MaterialTheme.typography.titleMedium)
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("Select Command Mode", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         plugin.actions.forEach { action ->
-                            FilterChip(
-                                selected = action.id == selectedAction?.id,
-                                onClick = {
-                                    onHapticTick()
-                                    selectedActionId = action.id
+                            val selected = action.id == selectedAction?.id
+                            val accent = if (selected) riskColor(action.riskLevel) else MaterialTheme.colorScheme.outline
+                            Surface(
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.surfaceContainerHigh
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerLow
                                 },
-                                label = { Text(action.label) },
-                                modifier = Modifier.testTag("action_chip_${action.id}")
-                            )
+                                shape = MaterialTheme.shapes.medium,
+                                border = BorderStroke(if (selected) 1.5.dp else 1.dp, accent),
+                                modifier = Modifier
+                                    .width(196.dp)
+                                    .clip(MaterialTheme.shapes.medium)
+                                    .springPressScale(onHapticTick = onHapticTick) {
+                                        selectedActionId = action.id
+                                    }
+                                    .testTag("action_chip_${action.id}")
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = action.label,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = action.description.ifBlank { action.subcommand.ifBlank { plugin.commandName } },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    RiskBadge(
+                                        risk = action.riskLevel,
+                                        requiresSudo = action.requiresSudo
+                                    )
+                                }
+                            }
                         }
                     }
                 }
 
                 if (selectedAction != null) {
                     item {
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                        AnimatedContent(
+                            targetState = selectedAction,
+                            transitionSpec = { fadeIn() togetherWith fadeOut() },
+                            label = "actionDetailTransition"
+                        ) { act ->
+                            GlowSurfaceCard(
+                                accentColor = riskColor(act.riskLevel),
+                                isPulsing = false,
+                                shape = MaterialTheme.shapes.medium
                             ) {
-                                RiskBadge(
-                                    risk = selectedAction.riskLevel,
-                                    requiresSudo = elevateSudo || selectedAction.requiresSudo
-                                )
-                                if (selectedAction.description.isNotBlank()) {
-                                    Text(
-                                        text = selectedAction.description,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(act.label, style = MaterialTheme.typography.titleMedium)
+                                        RiskBadge(
+                                            risk = act.riskLevel,
+                                            requiresSudo = elevateSudo || act.requiresSudo
+                                        )
+                                    }
+                                    if (act.description.isNotBlank()) {
+                                        Text(
+                                            text = act.description,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    CommandPreviewBox(
+                                        command = resolvedCommand,
+                                        onCopy = {
+                                            onHapticTick()
+                                            clipboard.setText(AnnotatedString(resolvedCommand))
+                                            onNotify("Copied command to clipboard")
+                                        }
                                     )
                                 }
                             }
                         }
                     }
 
-                    item {
-                        CommandPreviewBox(
-                            command = resolvedCommand,
-                            onCopy = {
-                                clipboard.setText(AnnotatedString(resolvedCommand))
-                                onNotify("Copied command to clipboard")
-                            }
-                        )
-                    }
-
                     if (selectedAction.parameters.isNotEmpty()) {
                         item {
-                            Text("Parameters", style = MaterialTheme.typography.titleMedium)
+                            Text("Configure Parameters", style = MaterialTheme.typography.titleMedium)
                         }
 
                         items(selectedAction.parameters, key = { "${selectedAction.id}_${it.id}" }) { param ->
@@ -295,7 +369,8 @@ fun PluginRunnerScreen(
                             ) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
                                 ) {
                                     Icon(
                                         Icons.Filled.Lock,
@@ -305,7 +380,7 @@ fun PluginRunnerScreen(
                                     Column {
                                         Text("Elevate with sudo", style = MaterialTheme.typography.titleSmall)
                                         Text(
-                                            text = "Requires manual biometric/password authorization",
+                                            text = "Requires biometric/password verification",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -356,6 +431,75 @@ fun PluginRunnerScreen(
                             )
                         }
                     }
+
+                    // Inline Rich Formatted Output View
+                    item {
+                        AnimatedVisibility(
+                            visible = showInlineOutput,
+                            enter = fadeIn() + expandVertically(),
+                            exit = fadeOut() + shrinkVertically()
+                        ) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                shape = MaterialTheme.shapes.large,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            if (terminalState.isRunning) {
+                                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                            }
+                                            Text("Interactive Output", style = MaterialTheme.typography.titleMedium)
+                                        }
+                                        TextButton(onClick = onExpandTerminal) {
+                                            Icon(Icons.Filled.OpenInFull, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Expand")
+                                        }
+                                    }
+
+                                    if (!terminalState.errorMessage.isNullOrBlank()) {
+                                        Text(
+                                            text = terminalState.errorMessage,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    } else {
+                                        RichCommandOutputView(
+                                            command = terminalState.command,
+                                            rawOutput = terminalState.output.ifBlank { "Running..." },
+                                            exitCode = terminalState.lastResult?.exitCode,
+                                            durationMs = terminalState.lastResult?.durationMs,
+                                            onCopyRaw = {
+                                                clipboard.setText(AnnotatedString(terminalState.output))
+                                                onNotify("Copied raw output")
+                                            }
+                                        )
+                                    }
+
+                                    if (terminalState.isRunning) {
+                                        InteractiveStdinPanel(
+                                            detectedPrompt = terminalState.detectedPrompt,
+                                            onSendInput = onSendInput,
+                                            onSendControl = onSendControl
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -376,7 +520,11 @@ private fun DynamicParameterControl(
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
                 shape = MaterialTheme.shapes.medium,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                border = BorderStroke(
+                    1.dp,
+                    if (checked) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                    else MaterialTheme.colorScheme.outlineVariant
+                ),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -413,52 +561,134 @@ private fun DynamicParameterControl(
         }
 
         ParameterType.SELECT_ENUM -> {
-            var expanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = expanded,
-                onExpandedChange = { expanded = !expanded }
-            ) {
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text(param.label) },
-                    supportingText = param.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                    modifier = Modifier
-                        .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                        .fillMaxWidth()
-                        .testTag("param_select_${param.id}")
-                )
-                ExposedDropdownMenu(
+            if (param.options.size in 1..4) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(param.label, style = MaterialTheme.typography.titleSmall)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        param.options.forEach { option ->
+                            FilterChip(
+                                selected = value == option,
+                                onClick = {
+                                    onHapticTick()
+                                    onValueChange(option)
+                                },
+                                label = { Text(option, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            )
+                        }
+                    }
+                }
+            } else {
+                var expanded by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(
                     expanded = expanded,
-                    onDismissRequest = { expanded = false }
+                    onExpandedChange = { expanded = !expanded }
                 ) {
-                    param.options.forEach { option ->
-                        DropdownMenuItem(
-                            text = { Text(option) },
-                            onClick = {
-                                onHapticTick()
-                                onValueChange(option)
-                                expanded = false
-                            }
-                        )
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text(param.label) },
+                        supportingText = param.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                        modifier = Modifier
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .fillMaxWidth()
+                            .testTag("param_select_${param.id}")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        param.options.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option) },
+                                onClick = {
+                                    onHapticTick()
+                                    onValueChange(option)
+                                    expanded = false
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
 
         ParameterType.NUMBER, ParameterType.PORT -> {
-            OutlinedTextField(
-                value = value,
-                onValueChange = { onValueChange(it.filter(Char::isDigit)) },
-                label = { Text(if (param.required) "${param.label} *" else param.label) },
-                placeholder = { Text(param.placeholder.ifBlank { param.flag.orEmpty() }) },
-                supportingText = param.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("param_number_${param.id}")
-            )
+            val currentInt = value.toIntOrNull() ?: 0
+            val step = if (param.type == ParameterType.PORT) 1 else if (currentInt >= 50) 10 else 1
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilledTonalIconButton(
+                    onClick = {
+                        onHapticTick()
+                        onValueChange((currentInt - step).coerceAtLeast(0).toString())
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Filled.Remove, contentDescription = "Decrease ${param.label}")
+                }
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { onValueChange(it.filter(Char::isDigit)) },
+                    label = { Text(if (param.required) "${param.label} *" else param.label) },
+                    placeholder = { Text(param.placeholder.ifBlank { param.flag.orEmpty() }) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("param_number_${param.id}")
+                )
+                FilledTonalIconButton(
+                    onClick = {
+                        onHapticTick()
+                        onValueChange((currentInt + step).toString())
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = "Increase ${param.label}")
+                }
+            }
+        }
+
+        ParameterType.PATH -> {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    label = { Text(if (param.required) "${param.label} *" else param.label) },
+                    placeholder = { Text(param.placeholder.ifBlank { "/var/log/" }) },
+                    supportingText = param.description.takeIf { it.isNotBlank() }?.let { { Text(it) } },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("param_text_${param.id}")
+                )
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf("~/", "/var/log/", "/etc/", ".").forEach { quickPath ->
+                        FilterChip(
+                            selected = value == quickPath,
+                            onClick = {
+                                onHapticTick()
+                                onValueChange(quickPath)
+                            },
+                            label = {
+                                Text(
+                                    quickPath,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                                )
+                            }
+                        )
+                    }
+                }
+            }
         }
 
         else -> {

@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -9,7 +8,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,10 +36,11 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.WifiTethering
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -61,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -72,7 +72,9 @@ import com.example.data.local.ExecutionLogEntity
 import com.example.domain.model.CliPlugin
 import com.example.domain.model.SshConnectionState
 import com.example.domain.model.SshHostProfile
+import com.example.ui.components.GlowSurfaceCard
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.springPressScale
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
 @Composable
@@ -86,9 +88,12 @@ fun WorkspaceScreen(
     onDeleteHost: (String) -> Unit,
     onConnectHost: (SshHostProfile) -> Unit,
     onDisconnectHost: () -> Unit,
+    onCheckHealthNow: () -> Unit,
+    onReconnectLast: () -> Unit,
     onOpenPlugin: (String) -> Unit,
     onOpenForge: () -> Unit,
     onClearLogs: () -> Unit,
+    onHapticTick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -105,7 +110,10 @@ fun WorkspaceScreen(
             item {
                 ConnectionHeroCard(
                     connectionState = connectionState,
+                    hasAnyHost = hosts.isNotEmpty(),
                     onDisconnect = onDisconnectHost,
+                    onCheckHealthNow = onCheckHealthNow,
+                    onReconnectLast = onReconnectLast,
                     onOpenForge = onOpenForge
                 )
             }
@@ -116,7 +124,10 @@ fun WorkspaceScreen(
                     subtitle = "POSIX-compliant Linux, macOS, and Windows OpenSSH targets",
                     trailing = {
                         FilledTonalButton(
-                            onClick = onAddHost,
+                            onClick = {
+                                onHapticTick()
+                                onAddHost()
+                            },
                             modifier = Modifier
                                 .heightIn(min = 48.dp)
                                 .testTag("add_host_button")
@@ -168,6 +179,7 @@ fun WorkspaceScreen(
                     plugins.take(8).forEach { plugin ->
                         QuickPluginCard(
                             plugin = plugin,
+                            onHapticTick = onHapticTick,
                             onClick = { onOpenPlugin(plugin.id) }
                         )
                     }
@@ -226,34 +238,33 @@ fun WorkspaceScreen(
 @Composable
 private fun ConnectionHeroCard(
     connectionState: SshConnectionState,
+    hasAnyHost: Boolean,
     onDisconnect: () -> Unit,
+    onCheckHealthNow: () -> Unit,
+    onReconnectLast: () -> Unit,
     onOpenForge: () -> Unit
 ) {
     val pulseTransition = rememberInfiniteTransition(label = "sshPulse")
     val pulseAlpha by pulseTransition.animateFloat(
-        initialValue = 0.4f,
+        initialValue = 0.35f,
         targetValue = 1.0f,
         animationSpec = infiniteRepeatable(
-            animation = tween(900),
+            animation = tween(850),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulseAlpha"
     )
 
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
-        ),
-        border = BorderStroke(
-            1.dp,
-            when (connectionState) {
-                is SshConnectionState.Connected -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.6f)
-                is SshConnectionState.Error -> MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
-                else -> MaterialTheme.colorScheme.outline
-            }
-        ),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
+    val accentColor = when (connectionState) {
+        is SshConnectionState.Connected -> MaterialTheme.colorScheme.secondary
+        is SshConnectionState.Connecting -> MaterialTheme.colorScheme.tertiary
+        is SshConnectionState.Error -> MaterialTheme.colorScheme.error
+        is SshConnectionState.Disconnected -> MaterialTheme.colorScheme.primary
+    }
+
+    GlowSurfaceCard(
+        accentColor = accentColor,
+        isPulsing = connectionState is SshConnectionState.Connected || connectionState is SshConnectionState.Connecting
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -270,43 +281,44 @@ private fun ConnectionHeroCard(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(12.dp)
+                            .size(11.dp)
                             .alpha(if (connectionState is SshConnectionState.Connected) pulseAlpha else 1f)
                             .clip(CircleShape)
-                            .background(
-                                when (connectionState) {
-                                    is SshConnectionState.Connected -> MaterialTheme.colorScheme.secondary
-                                    is SshConnectionState.Connecting -> MaterialTheme.colorScheme.tertiary
-                                    is SshConnectionState.Error -> MaterialTheme.colorScheme.error
-                                    is SshConnectionState.Disconnected -> MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                            )
+                            .background(accentColor)
                     )
                     Text(
                         text = when (connectionState) {
-                            is SshConnectionState.Connected -> "SSH SESSION ACTIVE"
+                            is SshConnectionState.Connected -> "SSH ACTIVE · KEEP-ALIVE 15s"
                             is SshConnectionState.Connecting -> "HANDSHAKING ${connectionState.hostLabel}..."
-                            is SshConnectionState.Error -> "CONNECTION ERROR"
-                            is SshConnectionState.Disconnected -> "NO ACTIVE SSH TUNNEL"
+                            is SshConnectionState.Error -> "TUNNEL INTERRUPTED"
+                            is SshConnectionState.Disconnected -> "STANDBY · READY TO CONNECT"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold,
-                        color = when (connectionState) {
-                            is SshConnectionState.Connected -> MaterialTheme.colorScheme.secondary
-                            is SshConnectionState.Error -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
-                        }
+                        color = accentColor
                     )
                 }
 
                 if (connectionState is SshConnectionState.Connected) {
-                    OutlinedButton(
-                        onClick = onDisconnect,
-                        modifier = Modifier.heightIn(min = 40.dp).testTag("disconnect_ssh_button")
-                    ) {
-                        Icon(Icons.Filled.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Disconnect")
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        IconButton(
+                            onClick = onCheckHealthNow,
+                            modifier = Modifier.testTag("check_ssh_health_button")
+                        ) {
+                            Icon(
+                                Icons.Filled.MonitorHeart,
+                                contentDescription = "Verify SSH heartbeat now",
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onDisconnect,
+                            modifier = Modifier.heightIn(min = 40.dp).testTag("disconnect_ssh_button")
+                        ) {
+                            Icon(Icons.Filled.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Disconnect")
+                        }
                     }
                 }
             }
@@ -328,6 +340,12 @@ private fun ConnectionHeroCard(
                         CapabilityPill(
                             text = connectionState.env.shell.substringAfterLast('/')
                         )
+                        connectionState.latencyMs?.let { rtt ->
+                            CapabilityPill(
+                                text = "${rtt}ms RTT",
+                                icon = Icons.Filled.MonitorHeart
+                            )
+                        }
                         if (connectionState.env.hasSudo) {
                             CapabilityPill(
                                 text = "sudo ready",
@@ -363,10 +381,21 @@ private fun ConnectionHeroCard(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error
                     )
+                    if (hasAnyHost) {
+                        Button(
+                            onClick = onReconnectLast,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("reconnect_ssh_button")
+                        ) {
+                            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Reconnect SSH Tunnel")
+                        }
+                    }
                 }
                 is SshConnectionState.Disconnected -> {
                     Text(
-                        text = "Connect to any Linux, macOS, or Windows OpenSSH host to probe `man` pages and execute GUI-driven commands.",
+                        text = "Connect to any Linux, macOS, or Windows OpenSSH host to probe `man` pages and run GUI-driven commands with automatic 15s keepalive monitoring.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -513,15 +542,19 @@ private fun HostProfileCard(
 }
 
 @Composable
-private fun QuickPluginCard(plugin: CliPlugin, onClick: () -> Unit) {
+private fun QuickPluginCard(
+    plugin: CliPlugin,
+    onHapticTick: () -> Unit,
+    onClick: () -> Unit
+) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
         shape = MaterialTheme.shapes.medium,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         modifier = Modifier
-            .width(172.dp)
+            .width(178.dp)
             .clip(MaterialTheme.shapes.medium)
-            .clickable(onClick = onClick)
+            .springPressScale(onHapticTick = onHapticTick, onClick = onClick)
             .testTag("quick_plugin_${plugin.commandName}")
     ) {
         Column(
@@ -533,17 +566,23 @@ private fun QuickPluginCard(plugin: CliPlugin, onClick: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = plugin.commandName,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
-                )
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.primary,
+                    shape = MaterialTheme.shapes.extraSmall
+                ) {
+                    Text(
+                        text = plugin.commandName,
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
                 Icon(
                     Icons.Filled.PlayArrow,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.secondary,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(18.dp)
                 )
             }
             Text(
@@ -553,7 +592,7 @@ private fun QuickPluginCard(plugin: CliPlugin, onClick: () -> Unit) {
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${plugin.actions.size} GUI actions",
+                text = "${plugin.actions.size} interactive actions",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -611,7 +650,7 @@ private fun ExecutionLogCard(log: ExecutionLogEntity) {
 @Composable
 private fun CapabilityPill(
     text: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector? = null
+    icon: ImageVector? = null
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,

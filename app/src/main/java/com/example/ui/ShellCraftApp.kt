@@ -1,12 +1,20 @@
 package com.example.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Extension
@@ -17,6 +25,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,6 +37,7 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,7 +45,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
@@ -50,6 +62,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import com.example.domain.model.ForgeState
 import com.example.domain.model.SshConnectionState
 import com.example.domain.model.SshHostProfile
 import com.example.ui.components.HostEditorDialog
@@ -61,6 +74,7 @@ import com.example.ui.screens.PluginRunnerScreen
 import com.example.ui.screens.PluginsScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.WorkspaceScreen
+import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ShellCraftTheme
 import kotlinx.serialization.Serializable
 
@@ -145,6 +159,10 @@ fun ShellCraftApp(
     var editingHost by remember { mutableStateOf<SshHostProfile?>(null) }
     var showSchemaDocs by remember { mutableStateOf(false) }
 
+    val isForgeBusy = forgeState is ForgeState.CheckingGitHub ||
+        forgeState is ForgeState.ProbingSshDocs ||
+        forgeState is ForgeState.AnalyzingWithLlm
+
     LaunchedEffect(bannerMessage) {
         val msg = bannerMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(msg)
@@ -165,8 +183,81 @@ fun ShellCraftApp(
                 topBar = {
                     if (!isRunnerScreen) {
                         CenterAlignedTopAppBar(
+                            navigationIcon = {
+                                val connected = connectionState as? SshConnectionState.Connected
+                                Surface(
+                                    color = if (connected != null) {
+                                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.7f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerHigh
+                                    },
+                                    shape = MaterialTheme.shapes.small,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (connected != null) MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f)
+                                        else MaterialTheme.colorScheme.outlineVariant
+                                    ),
+                                    modifier = Modifier
+                                        .padding(start = 10.dp)
+                                        .clip(MaterialTheme.shapes.small)
+                                        .clickable {
+                                            viewModel.haptics.tick()
+                                            if (connected != null) viewModel.checkSshHealthNow()
+                                            else navController.navigate(WorkspaceRoute)
+                                        }
+                                        .testTag("topbar_ssh_pill")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    when (connectionState) {
+                                                        is SshConnectionState.Connected -> MaterialTheme.colorScheme.secondary
+                                                        is SshConnectionState.Error -> MaterialTheme.colorScheme.error
+                                                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                    }
+                                                )
+                                        )
+                                        Text(
+                                            text = when (val st = connectionState) {
+                                                is SshConnectionState.Connected -> st.latencyMs?.let { "${it}ms" } ?: "SSH"
+                                                is SshConnectionState.Connecting -> "..."
+                                                is SshConnectionState.Error -> "Lost"
+                                                is SshConnectionState.Disconnected -> "Idle"
+                                            },
+                                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                                        )
+                                    }
+                                }
+                            },
                             title = { Text("ShellCraft", style = MaterialTheme.typography.headlineSmall) },
                             actions = {
+                                if (isForgeBusy) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        shape = MaterialTheme.shapes.small,
+                                        modifier = Modifier
+                                            .padding(end = 6.dp)
+                                            .clip(MaterialTheme.shapes.small)
+                                            .clickable { navController.navigate(ForgeRoute) }
+                                            .testTag("topbar_forge_active_pill")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Text("AI", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                }
                                 if (terminalState.command.isNotBlank()) {
                                     IconButton(
                                         onClick = { viewModel.reopenTerminal() },
@@ -174,12 +265,8 @@ fun ShellCraftApp(
                                     ) {
                                         Icon(
                                             Icons.Filled.Terminal,
-                                            contentDescription = "Last execution status",
-                                            tint = if (connectionState is SshConnectionState.Connected) {
-                                                MaterialTheme.colorScheme.secondary
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurfaceVariant
-                                            }
+                                            contentDescription = "Open last execution output",
+                                            tint = MaterialTheme.colorScheme.primary
                                         )
                                     }
                                 }
@@ -274,13 +361,16 @@ fun ShellCraftApp(
                                     onDeleteHost = { id -> viewModel.deleteHost(id) },
                                     onConnectHost = { host -> viewModel.connectHost(host) },
                                     onDisconnectHost = { viewModel.disconnectHost() },
+                                    onCheckHealthNow = { viewModel.checkSshHealthNow() },
+                                    onReconnectLast = { viewModel.reconnectLastHost() },
                                     onOpenPlugin = { pluginId ->
                                         navController.navigate(PluginRunnerRoute(pluginId))
                                     },
                                     onOpenForge = {
                                         navController.navigate(ForgeRoute)
                                     },
-                                    onClearLogs = { viewModel.clearLogs() }
+                                    onClearLogs = { viewModel.clearLogs() },
+                                    onHapticTick = { viewModel.haptics.tick() }
                                 )
                             }
 
@@ -305,15 +395,20 @@ fun ShellCraftApp(
                                         plugin = plugin,
                                         githubConfig = githubConfig,
                                         isSshConnected = connectionState is SshConnectionState.Connected,
+                                        terminalState = terminalState,
                                         onBack = { navController.popBackStack() },
                                         onExecute = { cmd, action, elevateSudo ->
                                             viewModel.requestCommandExecution(
+                                                pluginId = plugin.id,
                                                 pluginName = plugin.displayName,
                                                 command = cmd,
                                                 action = action,
                                                 elevateWithSudo = elevateSudo
                                             )
                                         },
+                                        onSendInput = { text, isSecret -> viewModel.sendTerminalInput(text, isSecret) },
+                                        onSendControl = { byte, label -> viewModel.sendTerminalControl(byte, label) },
+                                        onExpandTerminal = { viewModel.reopenTerminal() },
                                         onPublishToGitHub = { viewModel.publishPluginToGitHub(it) },
                                         onExportJson = { viewModel.exportPluginJson(it) },
                                         onDeletePlugin = { viewModel.deletePlugin(it) },
@@ -331,6 +426,7 @@ fun ShellCraftApp(
                                     onAnalyze = { cmd, mode, docs, bypass ->
                                         viewModel.startForgeAnalysis(cmd, mode, docs, bypass)
                                     },
+                                    onCancelAnalysis = { viewModel.cancelForgeAnalysis() },
                                     onSaveAndOpenPlugin = { plugin ->
                                         viewModel.savePlugin(plugin)
                                         viewModel.resetForge()
@@ -398,6 +494,8 @@ fun ShellCraftApp(
             if (terminalState.isVisible) {
                 LiveTerminalSheet(
                     state = terminalState,
+                    onSendInput = { text, isSecret -> viewModel.sendTerminalInput(text, isSecret) },
+                    onSendControl = { byte, label -> viewModel.sendTerminalControl(byte, label) },
                     onCopyOutput = { out ->
                         clipboard.setText(AnnotatedString(out))
                         viewModel.showMessage("Copied terminal output")

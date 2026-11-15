@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,14 +14,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.KeyboardReturn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QuestionAnswer
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -51,13 +56,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.example.core.security.BiometricAuthHelper
 import com.example.core.security.BiometricCapability
+import com.example.domain.model.InteractivePrompt
 import com.example.domain.model.PluginSchemaSpec
+import com.example.domain.model.PromptKind
 import com.example.domain.model.RiskLevel
 import com.example.domain.model.SshAuthType
 import com.example.domain.model.SshHostProfile
@@ -252,6 +261,8 @@ fun SafetyAndSudoDialog(
 @Composable
 fun LiveTerminalSheet(
     state: TerminalSessionState,
+    onSendInput: (text: String, isSecret: Boolean) -> Unit,
+    onSendControl: (ctrlByte: Int, label: String) -> Unit,
     onCopyOutput: (String) -> Unit,
     onStop: () -> Unit,
     onDismiss: () -> Unit
@@ -344,49 +355,238 @@ fun LiveTerminalSheet(
                 }
             }
 
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                shape = MaterialTheme.shapes.medium,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 180.dp, max = 380.dp)
-            ) {
+            if (state.isRunning || !state.errorMessage.isNullOrBlank()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                    shape = MaterialTheme.shapes.medium,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 180.dp, max = 380.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .verticalScroll(rememberScrollState())
+                            .horizontalScroll(rememberScrollState())
+                            .padding(12.dp)
+                    ) {
+                        Text(
+                            text = "$ ${state.command}",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = JetBrainsMonoFontFamily,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (!state.errorMessage.isNullOrBlank()) {
+                            Text(
+                                text = "ERROR: ${state.errorMessage}",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            )
+                        } else {
+                            Text(
+                                text = state.output.ifBlank { "Waiting for remote output..." },
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            )
+                        }
+                    }
+                }
+            } else {
                 Column(
                     modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 180.dp, max = 440.dp)
                         .verticalScroll(rememberScrollState())
-                        .horizontalScroll(rememberScrollState())
-                        .padding(12.dp)
                 ) {
-                    Text(
-                        text = "$ ${state.command}",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = JetBrainsMonoFontFamily,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold
-                        )
+                    RichCommandOutputView(
+                        command = state.command,
+                        rawOutput = state.output,
+                        exitCode = state.lastResult?.exitCode,
+                        durationMs = state.lastResult?.durationMs,
+                        onCopyRaw = { onCopyOutput(state.output) }
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    if (!state.errorMessage.isNullOrBlank()) {
-                        Text(
-                            text = "ERROR: ${state.errorMessage}",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = MaterialTheme.colorScheme.error
+                }
+            }
+
+            if (state.isRunning) {
+                InteractiveStdinPanel(
+                    detectedPrompt = state.detectedPrompt,
+                    onSendInput = onSendInput,
+                    onSendControl = onSendControl
+                )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+fun InteractiveStdinPanel(
+    detectedPrompt: InteractivePrompt?,
+    onSendInput: (text: String, isSecret: Boolean) -> Unit,
+    onSendControl: (ctrlByte: Int, label: String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var inputText by remember(detectedPrompt?.promptText) { mutableStateOf("") }
+    val isSecretPrompt = detectedPrompt?.kind == PromptKind.SECRET_INPUT
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        AnimatedVisibility(visible = detectedPrompt != null) {
+            detectedPrompt?.let { prompt ->
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f),
+                    shape = MaterialTheme.shapes.medium,
+                    border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.tertiary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("interactive_prompt_banner")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (isSecretPrompt) Icons.Filled.Lock else Icons.Filled.QuestionAnswer,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.tertiary,
+                                modifier = Modifier.size(16.dp)
                             )
-                        )
-                    } else {
-                        Text(
-                            text = state.output.ifBlank { "Waiting for remote output..." },
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = JetBrainsMonoFontFamily,
-                                color = MaterialTheme.colorScheme.onSurface
+                            Text(
+                                text = when (prompt.kind) {
+                                    PromptKind.SECRET_INPUT -> "Secret Input Required"
+                                    PromptKind.PRESS_ENTER -> "Waiting for Enter Key"
+                                    PromptKind.CONFIRM_YN, PromptKind.CONFIRM_YES_NO -> "Confirmation Required"
+                                    PromptKind.FREE_INPUT -> "Remote Process Waiting for Input"
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.tertiary
                             )
+                        }
+                        Text(
+                            text = prompt.promptText,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily)
                         )
+                        if (prompt.quickReplies.isNotEmpty()) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                prompt.quickReplies.forEachIndexed { idx, (label, payload) ->
+                                    if (idx == 0) {
+                                        Button(
+                                            onClick = { onSendInput(payload, false) },
+                                            modifier = Modifier
+                                                .heightIn(min = 42.dp)
+                                                .testTag("prompt_quick_reply_$idx")
+                                        ) {
+                                            Text(label)
+                                        }
+                                    } else {
+                                        OutlinedButton(
+                                            onClick = { onSendInput(payload, false) },
+                                            modifier = Modifier
+                                                .heightIn(min = 42.dp)
+                                                .testTag("prompt_quick_reply_$idx")
+                                        ) {
+                                            Text(label)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(16.dp))
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = inputText,
+                onValueChange = { inputText = it },
+                label = {
+                    Text(if (isSecretPrompt) "Enter secret / passphrase" else "Send stdin to running command")
+                },
+                placeholder = { Text(if (isSecretPrompt) "Hidden input" else "y, yes, path, or REPL command...") },
+                visualTransformation = if (isSecretPrompt) PasswordVisualTransformation() else VisualTransformation.None,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = if (isSecretPrompt) KeyboardType.Password else KeyboardType.Text,
+                    imeAction = ImeAction.Send
+                ),
+                keyboardActions = KeyboardActions(
+                    onSend = {
+                        onSendInput(inputText, isSecretPrompt)
+                        inputText = ""
+                    }
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("terminal_stdin_input")
+            )
+            IconButton(
+                onClick = {
+                    onSendInput(inputText, isSecretPrompt)
+                    inputText = ""
+                },
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("terminal_stdin_send_button")
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Send input to stdin",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            FilterChip(
+                selected = false,
+                onClick = { onSendInput("", false) },
+                leadingIcon = { Icon(Icons.Filled.KeyboardReturn, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                label = { Text("Enter") }
+            )
+            FilterChip(
+                selected = false,
+                onClick = { onSendInput("y", false) },
+                label = { Text("y") }
+            )
+            FilterChip(
+                selected = false,
+                onClick = { onSendInput("n", false) },
+                label = { Text("n") }
+            )
+            FilterChip(
+                selected = false,
+                onClick = { onSendControl(0x04, "D (EOF)") },
+                label = { Text("Ctrl+D") }
+            )
+            FilterChip(
+                selected = false,
+                onClick = { onSendControl(0x03, "C (SIGINT)") },
+                label = { Text("Ctrl+C") }
+            )
         }
     }
 }

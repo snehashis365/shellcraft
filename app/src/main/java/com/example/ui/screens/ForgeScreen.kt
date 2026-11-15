@@ -1,5 +1,19 @@
 package com.example.ui.screens
 
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.PackageManager
+import android.os.Build
+import android.view.WindowManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -19,37 +33,46 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.example.R
 import com.example.domain.model.CliPlugin
 import com.example.domain.model.ForgeState
@@ -57,6 +80,7 @@ import com.example.domain.model.LlmBackendConfig
 import com.example.domain.model.LlmProviderType
 import com.example.domain.model.PluginAnalysisSource
 import com.example.domain.model.SshConnectionState
+import com.example.ui.components.GlowSurfaceCard
 import com.example.ui.components.RiskBadge
 import com.example.ui.components.SectionHeader
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -67,10 +91,12 @@ fun ForgeScreen(
     llmConfig: LlmBackendConfig,
     connectionState: SshConnectionState,
     onAnalyze: (commandName: String, sourceMode: PluginAnalysisSource, manualDocs: String, bypassCheck: Boolean) -> Unit,
+    onCancelAnalysis: () -> Unit,
     onSaveAndOpenPlugin: (CliPlugin) -> Unit,
     onResetForge: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var commandName by remember { mutableStateOf("") }
     var sourceMode by remember {
         mutableStateOf(
@@ -79,6 +105,42 @@ fun ForgeScreen(
         )
     }
     var manualDocs by remember { mutableStateOf("") }
+
+    val isBusy = forgeState is ForgeState.CheckingGitHub ||
+        forgeState is ForgeState.ProbingSshDocs ||
+        forgeState is ForgeState.AnalyzingWithLlm
+
+    var askedNotificationPermission by rememberSaveable { mutableStateOf(false) }
+
+    // Keep screen awake cleanly while in foreground AND generation is active (WakeLock also protects screen-off)
+    DisposableEffect(isBusy) {
+        val activity = context.findActivity()
+        if (isBusy) {
+            runCatching { activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        }
+        onDispose {
+            runCatching { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+        }
+    }
+
+    val notificationPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { }
+    )
+
+    LaunchedEffect(Unit) {
+        if (!askedNotificationPermission &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            askedNotificationPermission = true
+            runCatching { notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+        }
+    }
+
+    val launchForge: (Boolean) -> Unit = { bypass ->
+        onAnalyze(commandName, sourceMode, manualDocs, bypass)
+    }
 
     val activeBackendLabel = when (llmConfig.providerType) {
         LlmProviderType.FIREBASE_GEMINI -> "Gemini (${llmConfig.geminiModel})"
@@ -93,7 +155,8 @@ fun ForgeScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 840.dp),
+                .widthIn(max = 840.dp)
+                .testTag("forge_lazy_column"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -126,7 +189,7 @@ fun ForgeScreen(
                                 color = MaterialTheme.colorScheme.onBackground
                             )
                             Text(
-                                text = "Checks GitHub & local cache first, then synthesizes typed GUI plugins from man/--help.",
+                                text = "Runs in a sleep-resilient background service so large local models won't drop if your screen locks.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -136,16 +199,10 @@ fun ForgeScreen(
             }
 
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    SectionHeader(
-                        title = "Target Command",
-                        subtitle = "Active Backend: $activeBackendLabel"
-                    )
-                }
+                SectionHeader(
+                    title = "Target Command",
+                    subtitle = "Backend: $activeBackendLabel · Timeout: ${llmConfig.timeoutSeconds}s"
+                )
             }
 
             item {
@@ -153,7 +210,7 @@ fun ForgeScreen(
                     value = commandName,
                     onValueChange = { commandName = it },
                     label = { Text("CLI Command Name") },
-                    placeholder = { Text("e.g. ufw, nginx, git, ffmpeg, kubectl") },
+                    placeholder = { Text("e.g. ping, ufw, nginx, git, ffmpeg") },
                     leadingIcon = { Icon(Icons.Filled.Terminal, contentDescription = null) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("forge_command_input")
@@ -215,42 +272,108 @@ fun ForgeScreen(
             }
 
             item {
-                val isBusy = forgeState is ForgeState.CheckingGitHub ||
-                    forgeState is ForgeState.ProbingSshDocs ||
-                    forgeState is ForgeState.AnalyzingWithLlm
-
-                Button(
-                    onClick = { onAnalyze(commandName, sourceMode, manualDocs, false) },
-                    enabled = !isBusy && commandName.isNotBlank(),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 52.dp)
-                        .testTag("forge_analyze_button")
-                ) {
-                    if (isBusy) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary
-                        )
+                if (isBusy) {
+                    Button(
+                        onClick = onCancelAnalysis,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 52.dp)
+                            .testTag("forge_stop_button")
+                    ) {
+                        Icon(Icons.Filled.Stop, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
-                    } else {
+                        Text("Stop Background Generation")
+                    }
+                } else {
+                    Button(
+                        onClick = { launchForge(false) },
+                        enabled = commandName.isNotBlank(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 52.dp)
+                            .testTag("forge_analyze_button")
+                    ) {
                         Icon(Icons.Filled.AutoAwesome, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
+                        Text("Check Repo & Generate GUI Plugin")
                     }
-                    Text(if (isBusy) "Synthesizing Plugin..." else "Check Repo & Generate GUI Plugin")
                 }
             }
 
             item {
-                ForgeResultSection(
-                    forgeState = forgeState,
-                    onSaveAndOpen = onSaveAndOpenPlugin,
-                    onRegenerateAnyway = {
-                        onAnalyze(commandName, sourceMode, manualDocs, true)
-                    },
-                    onReset = onResetForge
-                )
+                AnimatedVisibility(
+                    visible = forgeState !is ForgeState.Idle,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PipelineStepper(forgeState = forgeState)
+                        ForgeResultSection(
+                            forgeState = forgeState,
+                            onSaveAndOpen = onSaveAndOpenPlugin,
+                            onRegenerateAnyway = { launchForge(true) },
+                            onReset = onResetForge
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PipelineStepper(forgeState: ForgeState) {
+    val activeStep = when (forgeState) {
+        is ForgeState.CheckingGitHub -> 1
+        is ForgeState.ProbingSshDocs -> 2
+        is ForgeState.AnalyzingWithLlm -> 3
+        is ForgeState.Ready, is ForgeState.FoundExistingRemote -> 4
+        else -> 0
+    }
+    if (activeStep == 0) return
+
+    val steps = listOf("Repo", "Docs", "AI Synth", "GUI Ready")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        steps.forEachIndexed { idx, label ->
+            val stepNum = idx + 1
+            val done = activeStep > stepNum || (activeStep == 4 && stepNum == 4)
+            val current = activeStep == stepNum && activeStep < 4
+            Surface(
+                color = when {
+                    done -> MaterialTheme.colorScheme.secondaryContainer
+                    current -> MaterialTheme.colorScheme.primaryContainer
+                    else -> MaterialTheme.colorScheme.surfaceContainerLow
+                },
+                contentColor = when {
+                    done -> MaterialTheme.colorScheme.secondary
+                    current -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.weight(1f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    if (done) {
+                        Icon(Icons.Filled.CheckCircle, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                    } else if (current) {
+                        CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
         }
     }
@@ -275,14 +398,14 @@ private fun ForgeResultSection(
         }
 
         is ForgeState.AnalyzingWithLlm -> {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
-                modifier = Modifier.fillMaxWidth()
+            GlowSurfaceCard(
+                accentColor = MaterialTheme.colorScheme.primary,
+                isPulsing = true,
+                shape = MaterialTheme.shapes.medium
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -291,12 +414,18 @@ private fun ForgeResultSection(
                         CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                         Text(forgeState.statusMessage, style = MaterialTheme.typography.titleSmall)
                     }
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        text = "Foreground Service + WakeLock active — safe if phone screen turns off.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
                     if (forgeState.rawDocsPreview.isNotBlank()) {
                         Text(
                             text = forgeState.rawDocsPreview,
                             style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 5
+                            maxLines = 4
                         )
                     }
                 }
@@ -351,10 +480,11 @@ private fun ForgeResultSection(
 
         is ForgeState.Ready -> {
             val plugin = forgeState.plugin
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary),
-                modifier = Modifier.fillMaxWidth().testTag("forge_ready_card")
+            GlowSurfaceCard(
+                accentColor = MaterialTheme.colorScheme.secondary,
+                isPulsing = false,
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier.testTag("forge_ready_card")
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
@@ -477,4 +607,10 @@ private fun StatusCard(message: String) {
             Text(text = message, style = MaterialTheme.typography.bodyMedium)
         }
     }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

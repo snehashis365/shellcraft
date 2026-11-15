@@ -59,7 +59,7 @@ class SettingsDataStore(private val context: Context) {
             customEndpointUrl = prefs[Keys.CUSTOM_ENDPOINT] ?: "http://192.168.1.100:11434",
             customModelName = prefs[Keys.CUSTOM_MODEL] ?: "qwen2.5-coder:7b",
             encryptedApiKey = prefs[Keys.ENCRYPTED_LLM_KEY] ?: "",
-            timeoutSeconds = prefs[Keys.LLM_TIMEOUT_SEC] ?: 60
+            timeoutSeconds = prefs[Keys.LLM_TIMEOUT_SEC] ?: 240
         )
     }
 
@@ -102,7 +102,7 @@ class SettingsDataStore(private val context: Context) {
             if (plainApiKey != null) {
                 prefs[Keys.ENCRYPTED_LLM_KEY] = if (plainApiKey.isBlank()) "" else SecretCipher.encrypt(plainApiKey)
             }
-            prefs[Keys.LLM_TIMEOUT_SEC] = timeoutSeconds.coerceIn(15, 180)
+            prefs[Keys.LLM_TIMEOUT_SEC] = timeoutSeconds.coerceIn(30, 600)
         }
     }
 

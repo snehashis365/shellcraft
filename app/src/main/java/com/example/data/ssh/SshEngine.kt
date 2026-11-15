@@ -2,6 +2,7 @@ package com.example.data.ssh
 
 import android.util.Log
 import com.example.core.security.SecretCipher
+import com.example.domain.model.InteractivePromptDetector
 import com.example.domain.model.PluginCommandBuilder
 import com.example.domain.model.RemoteEnvironmentInfo
 import com.example.domain.model.SshAuthType
@@ -12,21 +13,26 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 
 private const val TAG = "SshEngine"
 
 class SshEngine {
     private val sessionMutex = Mutex()
+    private val stdinLock = Any()
     private var activeSession: Session? = null
     private var activeHost: SshHostProfile? = null
+    private var activeEnv: RemoteEnvironmentInfo? = null
+    @Volatile
+    private var activeStdinStream: OutputStream? = null
+    @Volatile
+    private var activeExecChannel: ChannelExec? = null
 
     fun isConnected(): Boolean = activeSession?.isConnected == true
 
@@ -53,12 +59,14 @@ class SshEngine {
             session.setConfig("StrictHostKeyChecking", "no")
             session.setConfig("PreferredAuthentications", "publickey,password,keyboard-interactive")
             session.timeout = 15_000
+            session.setServerAliveInterval(15_000)
+            session.setServerAliveCountMax(3)
             session.connect(15_000)
 
             activeSession = session
             activeHost = profile
 
-            probeEnvironmentInternal(session)
+            probeEnvironmentInternal(session).also { activeEnv = it }
         }
     }
 
@@ -66,6 +74,14 @@ class SshEngine {
         sessionMutex.withLock {
             disconnectInternal()
         }
+    }
+
+    suspend fun checkHealth(): Long = withContext(Dispatchers.IO) {
+        val session = activeSession?.takeIf { it.isConnected }
+            ?: throw IllegalStateException("SSH session closed")
+        val startMs = System.currentTimeMillis()
+        session.sendKeepAliveMsg()
+        System.currentTimeMillis() - startMs
     }
 
     private fun disconnectInternal() {
@@ -76,6 +92,7 @@ class SshEngine {
         } finally {
             activeSession = null
             activeHost = null
+            activeEnv = null
         }
     }
 
@@ -96,13 +113,22 @@ class SshEngine {
         val session = activeSession?.takeIf { it.isConnected }
             ?: throw IllegalStateException("No active SSH connection. Connect to a host first.")
         val safeCmd = PluginCommandBuilder.posixQuote(commandName.trim())
-        val probeScript = buildString {
+        val rawScript = buildString {
             append("echo '=== WHICH ==='; command -v $safeCmd 2>&1 || true; ")
             append("echo '=== VERSION ==='; $safeCmd --version 2>&1 | head -n 5 || true; ")
             append("echo '=== HELP ==='; ($safeCmd --help 2>&1 || $safeCmd -h 2>&1 || true) | head -n 160; ")
-            append("echo '=== MAN ==='; if command -v man >/dev/null 2>&1; then MANWIDTH=100 man $safeCmd 2>/dev/null | col -b 2>/dev/null | head -n 220; fi")
+            append("echo '=== MAN ==='; if command -v man >/dev/null 2>&1; then MANWIDTH=100 MANPATH=\"/opt/homebrew/share/man:/usr/local/share/man:\${MANPATH:-}\" man $safeCmd 2>/dev/null | col -b 2>/dev/null | head -n 220; fi")
         }
-        val result = executeBlocking(session, probeScript, sudoPassword = null, onStdoutChunk = null, onStderrChunk = null)
+        val probeScript = wrapWithExtendedPath(rawScript, activeEnv)
+        val result = executeBlocking(
+            session = session,
+            execCommand = probeScript,
+            displayCommand = "probe $commandName",
+            allocatePty = false,
+            sudoPassword = null,
+            onStdoutChunk = null,
+            onStderrChunk = null
+        )
         val combined = result.stdout.ifBlank { result.stderr }
         if (combined.isBlank()) {
             throw IllegalStateException("Command '$commandName' produced no help or man output on remote host.")
@@ -113,6 +139,7 @@ class SshEngine {
     suspend fun executeCommand(
         command: String,
         sudoPassword: String? = null,
+        allocatePty: Boolean = true,
         onStdoutChunk: ((String) -> Unit)? = null,
         onStderrChunk: ((String) -> Unit)? = null
     ): SshExecutionResult = withContext(Dispatchers.IO) {
@@ -123,13 +150,47 @@ class SshEngine {
         } else {
             command
         }
+        val execCommand = wrapWithExtendedPath(effectiveCommand, activeEnv)
         executeBlocking(
             session = session,
-            command = effectiveCommand,
+            execCommand = execCommand,
+            displayCommand = command,
+            allocatePty = allocatePty,
             sudoPassword = sudoPassword,
             onStdoutChunk = onStdoutChunk,
             onStderrChunk = onStderrChunk
         )
+    }
+
+    suspend fun sendInteractiveInput(input: String, appendNewline: Boolean = true): Boolean = withContext(Dispatchers.IO) {
+        val stream = activeStdinStream ?: return@withContext false
+        runCatching {
+            synchronized(stdinLock) {
+                val payload = if (appendNewline) "$input\n" else input
+                stream.write(payload.toByteArray(StandardCharsets.UTF_8))
+                stream.flush()
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    suspend fun sendControlByte(ctrlByte: Int): Boolean = withContext(Dispatchers.IO) {
+        val stream = activeStdinStream ?: return@withContext false
+        runCatching {
+            synchronized(stdinLock) {
+                stream.write(ctrlByte)
+                stream.flush()
+            }
+            true
+        }.getOrDefault(false)
+    }
+
+    fun cancelActiveCommand() {
+        runCatching {
+            activeExecChannel?.disconnect()
+        }
+        activeStdinStream = null
+        activeExecChannel = null
     }
 
     private fun rewriteWithStdinSudo(command: String): String {
@@ -143,7 +204,9 @@ class SshEngine {
 
     private fun executeBlocking(
         session: Session,
-        command: String,
+        execCommand: String,
+        displayCommand: String = execCommand,
+        allocatePty: Boolean = false,
         sudoPassword: String?,
         onStdoutChunk: ((String) -> Unit)?,
         onStderrChunk: ((String) -> Unit)?
@@ -152,7 +215,11 @@ class SshEngine {
         var channel: ChannelExec? = null
         try {
             channel = session.openChannel("exec") as ChannelExec
-            channel.setCommand(command)
+            if (allocatePty) {
+                channel.setPty(true)
+                channel.setPtyType("vt100", 120, 36, 0, 0)
+            }
+            channel.setCommand(execCommand)
             channel.setInputStream(null)
 
             val outBuffer = ByteArrayOutputStream()
@@ -162,10 +229,14 @@ class SshEngine {
             val stdinStream = channel.outputStream
 
             channel.connect(15_000)
+            activeExecChannel = channel
+            activeStdinStream = stdinStream
 
             if (sudoPassword != null) {
-                stdinStream.write((sudoPassword + "\n").toByteArray(StandardCharsets.UTF_8))
-                stdinStream.flush()
+                synchronized(stdinLock) {
+                    stdinStream.write((sudoPassword + "\n").toByteArray(StandardCharsets.UTF_8))
+                    stdinStream.flush()
+                }
             }
 
             val buf = ByteArray(4096)
@@ -177,13 +248,19 @@ class SshEngine {
                     val read = stdoutStream.read(buf, 0, buf.size)
                     if (read <= 0) break
                     outBuffer.write(buf, 0, read)
-                    onStdoutChunk?.invoke(String(buf, 0, read, StandardCharsets.UTF_8))
+                    val cleanChunk = InteractivePromptDetector.stripAnsi(String(buf, 0, read, StandardCharsets.UTF_8))
+                    if (cleanChunk.isNotEmpty()) {
+                        onStdoutChunk?.invoke(cleanChunk)
+                    }
                 }
                 while (stderrStream.available() > 0) {
                     val read = stderrStream.read(buf, 0, buf.size)
                     if (read <= 0) break
                     errBuffer.write(buf, 0, read)
-                    onStderrChunk?.invoke(String(buf, 0, read, StandardCharsets.UTF_8))
+                    val cleanChunk = InteractivePromptDetector.stripAnsi(String(buf, 0, read, StandardCharsets.UTF_8))
+                    if (cleanChunk.isNotEmpty()) {
+                        onStderrChunk?.invoke(cleanChunk)
+                    }
                 }
                 if (channel.isClosed) {
                     if (stdoutStream.available() > 0 || stderrStream.available() > 0) continue
@@ -193,10 +270,10 @@ class SshEngine {
             }
 
             return SshExecutionResult(
-                command = command.replace("sudo -S -p '' ", "sudo "),
+                command = displayCommand.replace("sudo -S -p '' ", "sudo "),
                 exitCode = channel.exitStatus,
-                stdout = outBuffer.toString(StandardCharsets.UTF_8.name()),
-                stderr = errBuffer.toString(StandardCharsets.UTF_8.name()),
+                stdout = InteractivePromptDetector.stripAnsi(outBuffer.toString(StandardCharsets.UTF_8.name())),
+                stderr = InteractivePromptDetector.stripAnsi(errBuffer.toString(StandardCharsets.UTF_8.name())),
                 durationMs = System.currentTimeMillis() - startMs,
                 elevatedWithSudo = sudoPassword != null
             )
@@ -206,10 +283,30 @@ class SshEngine {
             Log.e(TAG, "SSH execution failed", e)
             throw IllegalStateException(e.localizedMessage ?: "SSH execution failed", e)
         } finally {
+            activeStdinStream = null
+            activeExecChannel = null
             try {
                 channel?.disconnect()
             } catch (_: Exception) {
             }
+        }
+    }
+
+    companion object {
+        private const val POSIX_PATH_EXPORT =
+            "export PATH=\"/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:\$HOME/.local/bin:\$HOME/.cargo/bin:\$HOME/go/bin:\$HOME/bin:/home/linuxbrew/.linuxbrew/bin:/usr/sbin:/sbin:\$PATH\"; "
+
+        internal fun wrapWithExtendedPath(command: String, env: RemoteEnvironmentInfo?): String {
+            if (env != null) {
+                val os = env.osName.lowercase()
+                val sh = env.shell.lowercase()
+                val isNonPosixWindows = os.contains("windows") &&
+                    !sh.contains("bash") && !sh.contains("zsh") && !sh.endsWith("/sh")
+                if (isNonPosixWindows || sh.endsWith("fish") || sh.endsWith("csh") || sh.endsWith("tcsh")) {
+                    return command
+                }
+            }
+            return "$POSIX_PATH_EXPORT$command"
         }
     }
 }

@@ -189,6 +189,11 @@ ShellCraft converts any POSIX / Linux / macOS / Windows-OpenSSH CLI application 
 }
 ```
 
+## Interactive Shells & Stdin Prompts
+ShellCraft executes commands over an allocated SSH pseudo-terminal (PTY) with live bidirectional stdin/stdout streaming:
+- Set `"outputHint": "interactive"` on actions that launch interactive prompts or confirmations (e.g., `ufw enable`, `brew upgrade --interactive`, `passwd`, REPLs).
+- If a running command pauses for input (`[y/N]`, `(yes/no)`, `Password:`, `Press Enter`, or a custom partial-line prompt), ShellCraft detects the prompt from the stream and surfaces one-tap confirmation buttons, masked secret fields, or a live stdin input bar to forward responses directly to the remote process.
+
 ## Contributing via Agents or CI
 Third-party developers and automated doc agents can generate `shellcraft.plugin.v1` JSON files from `man` pages or `--help` output and commit them to `plugins/<commandName>.json` in your team's GitHub repository. ShellCraft automatically discovers and validates new manifests on sync."""
 }

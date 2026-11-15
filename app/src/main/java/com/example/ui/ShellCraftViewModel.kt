@@ -4,25 +4,24 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.core.security.HapticFeedbackController
+import com.example.core.AppContainer
 import com.example.core.security.SafetyAssessment
 import com.example.core.security.SafetyGuard
 import com.example.core.security.SecretCipher
-import com.example.data.github.GitHubPluginSyncClient
-import com.example.data.llm.LlmPluginAnalyzer
 import com.example.data.local.ExecutionLogEntity
 import com.example.data.local.SecuritySettings
-import com.example.data.repository.ShellCraftRepository
-import com.example.data.ssh.SshEngine
 import com.example.domain.model.CliPlugin
 import com.example.domain.model.ForgeState
 import com.example.domain.model.GitHubRepoConfig
 import com.example.domain.model.GitHubSyncPolicy
+import com.example.domain.model.InteractivePrompt
+import com.example.domain.model.InteractivePromptDetector
 import com.example.domain.model.LlmBackendConfig
 import com.example.domain.model.LlmProviderType
 import com.example.domain.model.PluginAction
 import com.example.domain.model.PluginAnalysisSource
 import com.example.domain.model.PluginSource
+import com.example.domain.model.RiskLevel
 import com.example.domain.model.SshAuthType
 import com.example.domain.model.SshConnectionState
 import com.example.domain.model.SshExecutionResult
@@ -31,12 +30,14 @@ import com.example.domain.model.SyncStatus
 import com.example.domain.model.TargetOs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -53,19 +54,25 @@ data class PendingExecutionRequest(
 data class TerminalSessionState(
     val isVisible: Boolean = false,
     val isRunning: Boolean = false,
+    val pluginId: String? = null,
     val command: String = "",
     val output: String = "",
+    val detectedPrompt: InteractivePrompt? = null,
     val lastResult: SshExecutionResult? = null,
     val errorMessage: String? = null
 )
 
 class ShellCraftViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository = ShellCraftRepository(application)
-    private val sshEngine = SshEngine()
-    private val llmAnalyzer = LlmPluginAnalyzer()
-    private val gitHubClient = GitHubPluginSyncClient()
-    val haptics = HapticFeedbackController(application)
+    init {
+        AppContainer.ensureInitialized(application)
+    }
+
+    private val repository = AppContainer.repository
+    private val sshEngine = AppContainer.sshEngine
+    private val llmAnalyzer = AppContainer.llmAnalyzer
+    private val gitHubClient = AppContainer.gitHubClient
+    val haptics = AppContainer.haptics
 
     val hosts: StateFlow<List<SshHostProfile>> = repository.hostsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -85,11 +92,10 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     val securitySettings: StateFlow<SecuritySettings> = repository.settingsDataStore.securitySettingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SecuritySettings())
 
+    val forgeState: StateFlow<ForgeState> = AppContainer.forgeState
+
     private val _connectionState = MutableStateFlow<SshConnectionState>(SshConnectionState.Disconnected)
     val connectionState: StateFlow<SshConnectionState> = _connectionState.asStateFlow()
-
-    private val _forgeState = MutableStateFlow<ForgeState>(ForgeState.Idle)
-    val forgeState: StateFlow<ForgeState> = _forgeState.asStateFlow()
 
     private val _syncStatus = MutableStateFlow<SyncStatus>(SyncStatus.LocalOnly)
     val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
@@ -104,6 +110,9 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     val bannerMessage: StateFlow<String?> = _bannerMessage.asStateFlow()
 
     private var activeExecutionJob: Job? = null
+    private var promptWatchJob: Job? = null
+    private var heartbeatJob: Job? = null
+    private var lastAttemptedHost: SshHostProfile? = null
 
     init {
         viewModelScope.launch {
@@ -146,7 +155,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         _bannerMessage.value = message
     }
 
-    // --- SSH Host Management & Connection ---
+    // --- SSH Host Management & Periodic Heartbeat ---
 
     fun saveHost(
         existingId: String?,
@@ -197,6 +206,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             val current = _connectionState.value
             if (current is SshConnectionState.Connected && current.host.id == id) {
+                heartbeatJob?.cancel()
                 sshEngine.disconnect()
                 _connectionState.value = SshConnectionState.Disconnected
             }
@@ -206,14 +216,25 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun connectHost(profile: SshHostProfile) {
+        lastAttemptedHost = profile
+        heartbeatJob?.cancel()
         viewModelScope.launch {
             _connectionState.value = SshConnectionState.Connecting(profile.label)
             haptics.tick()
             try {
+                val startMs = System.currentTimeMillis()
                 val env = sshEngine.connect(profile)
+                val rtt = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
                 repository.markHostConnected(profile.id)
-                _connectionState.value = SshConnectionState.Connected(profile, env)
+                _connectionState.value = SshConnectionState.Connected(
+                    host = profile,
+                    env = env,
+                    latencyMs = rtt,
+                    lastHeartbeatAtMs = System.currentTimeMillis(),
+                    isHealthy = true
+                )
                 haptics.success()
+                startHeartbeatMonitor()
                 val gh = githubConfig.value
                 if (gh.isConfigured && gh.syncPolicy == GitHubSyncPolicy.ON_SSH_CONNECT) {
                     syncGitHubPlugins(silent = true)
@@ -230,7 +251,65 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun reconnectLastHost() {
+        val target = lastAttemptedHost ?: hosts.value.firstOrNull()
+        if (target != null) {
+            connectHost(target)
+        } else {
+            _bannerMessage.value = "Add an SSH host to connect."
+        }
+    }
+
+    fun checkSshHealthNow() {
+        viewModelScope.launch {
+            val current = _connectionState.value as? SshConnectionState.Connected ?: return@launch
+            try {
+                val latency = sshEngine.checkHealth()
+                _connectionState.value = current.copy(
+                    latencyMs = latency,
+                    lastHeartbeatAtMs = System.currentTimeMillis(),
+                    isHealthy = true
+                )
+                haptics.tick()
+            } catch (e: Exception) {
+                heartbeatJob?.cancel()
+                _connectionState.value = SshConnectionState.Error(
+                    "SSH keepalive failed: ${e.localizedMessage ?: "Tunnel dropped"}"
+                )
+                haptics.warning()
+            }
+        }
+    }
+
+    private fun startHeartbeatMonitor() {
+        heartbeatJob?.cancel()
+        heartbeatJob = viewModelScope.launch {
+            while (isActive) {
+                delay(15_000L)
+                val current = _connectionState.value as? SshConnectionState.Connected ?: break
+                try {
+                    val latency = sshEngine.checkHealth()
+                    _connectionState.value = current.copy(
+                        latencyMs = latency,
+                        lastHeartbeatAtMs = System.currentTimeMillis(),
+                        isHealthy = true
+                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Periodic SSH heartbeat failed", e)
+                    _connectionState.value = SshConnectionState.Error(
+                        "SSH connection lost (${e.localizedMessage ?: "timeout"})."
+                    )
+                    haptics.warning()
+                    break
+                }
+            }
+        }
+    }
+
     fun disconnectHost() {
+        heartbeatJob?.cancel()
         viewModelScope.launch {
             sshEngine.disconnect()
             _connectionState.value = SshConnectionState.Disconnected
@@ -241,6 +320,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     // --- Safe Execution & Biometric Sudo ---
 
     fun requestCommandExecution(
+        pluginId: String?,
         pluginName: String,
         command: String,
         action: PluginAction?,
@@ -260,7 +340,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         )
 
         if (assessment.requiresConfirmation || assessment.requiresSuperuserAuth) {
-            if (assessment.effectiveRisk >= com.example.domain.model.RiskLevel.HIGH) {
+            if (assessment.effectiveRisk >= RiskLevel.HIGH) {
                 haptics.danger()
             } else {
                 haptics.warning()
@@ -272,9 +352,10 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
                 assessment = assessment,
                 biometricVerified = !sec.requireBiometricForSudo
             )
+            _terminalState.value = _terminalState.value.copy(pluginId = pluginId)
         } else {
             haptics.tick()
-            launchSshExecution(pluginName, command, sudoPassword = null)
+            launchSshExecution(pluginId, pluginName, command, sudoPassword = null)
         }
     }
 
@@ -286,8 +367,10 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
 
     fun confirmPendingExecution(sudoPassword: String?) {
         val pending = _pendingExecution.value ?: return
+        val pluginId = _terminalState.value.pluginId
         _pendingExecution.value = null
         launchSshExecution(
+            pluginId = pluginId,
             pluginName = pending.pluginName,
             command = pending.command,
             sudoPassword = sudoPassword?.takeIf { pending.assessment.requiresSuperuserAuth }
@@ -311,19 +394,57 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun cancelRunningExecution() {
+        promptWatchJob?.cancel()
         activeExecutionJob?.cancel()
+        sshEngine.cancelActiveCommand()
         _terminalState.value = _terminalState.value.copy(
             isRunning = false,
+            detectedPrompt = null,
             errorMessage = "Execution cancelled by user."
         )
         haptics.warning()
     }
 
+    fun sendTerminalInput(text: String, isSecret: Boolean = false) {
+        viewModelScope.launch {
+            val sent = sshEngine.sendInteractiveInput(text, appendNewline = true)
+            if (sent) {
+                haptics.tick()
+                val marker = if (isSecret) "[secret sent]" else text
+                val currentOut = _terminalState.value.output
+                val suffix = if (currentOut.endsWith("\n") || currentOut.isEmpty()) "" else "\n"
+                _terminalState.value = _terminalState.value.copy(
+                    output = "$currentOut$suffix> $marker\n",
+                    detectedPrompt = null
+                )
+            } else {
+                haptics.warning()
+                _bannerMessage.value = "Process stdin is no longer open."
+            }
+        }
+    }
+
+    fun sendTerminalControl(ctrlByte: Int, label: String) {
+        viewModelScope.launch {
+            val sent = sshEngine.sendControlByte(ctrlByte)
+            if (sent) {
+                haptics.tick()
+                val currentOut = _terminalState.value.output
+                _terminalState.value = _terminalState.value.copy(
+                    output = "$currentOut\n^$label\n",
+                    detectedPrompt = null
+                )
+            }
+        }
+    }
+
     private fun launchSshExecution(
+        pluginId: String?,
         pluginName: String,
         command: String,
         sudoPassword: String?
     ) {
+        promptWatchJob?.cancel()
         activeExecutionJob?.cancel()
         activeExecutionJob = viewModelScope.launch {
             val hostLabel = (_connectionState.value as? SshConnectionState.Connected)?.host?.label ?: "SSH Host"
@@ -331,30 +452,62 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
             _terminalState.value = TerminalSessionState(
                 isVisible = true,
                 isRunning = true,
+                pluginId = pluginId,
                 command = command,
                 output = "",
+                detectedPrompt = null,
                 lastResult = null,
                 errorMessage = null
             )
+
+            val schedulePromptCheck: () -> Unit = {
+                promptWatchJob?.cancel()
+                val snapshot = outputBuilder.toString()
+                val immediate = InteractivePromptDetector.detect(snapshot, stalledOnPartialLine = false)
+                if (immediate != null && _terminalState.value.detectedPrompt == null) {
+                    haptics.warning()
+                }
+                _terminalState.value = _terminalState.value.copy(
+                    output = snapshot,
+                    detectedPrompt = immediate
+                )
+                promptWatchJob = viewModelScope.launch {
+                    delay(450L)
+                    if (_terminalState.value.isRunning) {
+                        val delayed = InteractivePromptDetector.detect(
+                            outputBuilder.toString(),
+                            stalledOnPartialLine = true
+                        )
+                        if (delayed != null && _terminalState.value.detectedPrompt == null) {
+                            haptics.warning()
+                            _terminalState.value = _terminalState.value.copy(detectedPrompt = delayed)
+                        }
+                    }
+                }
+            }
+
             try {
                 val result = sshEngine.executeCommand(
                     command = command,
                     sudoPassword = sudoPassword,
+                    allocatePty = true,
                     onStdoutChunk = { chunk ->
                         outputBuilder.append(chunk)
-                        _terminalState.value = _terminalState.value.copy(output = outputBuilder.toString())
+                        schedulePromptCheck()
                     },
                     onStderrChunk = { chunk ->
                         outputBuilder.append(chunk)
-                        _terminalState.value = _terminalState.value.copy(output = outputBuilder.toString())
+                        schedulePromptCheck()
                     }
                 )
+                promptWatchJob?.cancel()
                 val finalOutput = outputBuilder.toString().ifBlank {
                     listOf(result.stdout, result.stderr).filter { it.isNotBlank() }.joinToString("\n")
                 }
                 _terminalState.value = _terminalState.value.copy(
                     isRunning = false,
                     output = finalOutput.ifBlank { "(Command completed with no output)" },
+                    detectedPrompt = null,
                     lastResult = result
                 )
                 repository.recordExecution(
@@ -368,11 +521,14 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
                 )
                 if (result.exitCode == 0) haptics.success() else haptics.warning()
             } catch (e: CancellationException) {
+                promptWatchJob?.cancel()
                 throw e
             } catch (e: Exception) {
+                promptWatchJob?.cancel()
                 Log.e(TAG, "Command execution error", e)
                 _terminalState.value = _terminalState.value.copy(
                     isRunning = false,
+                    detectedPrompt = null,
                     errorMessage = e.localizedMessage ?: "SSH command execution failed."
                 )
                 haptics.danger()
@@ -380,10 +536,10 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // --- AI Forge & Check-Before-Generate ---
+    // --- Sleep-Resilient AI Forge Service ---
 
     fun resetForge() {
-        _forgeState.value = ForgeState.Idle
+        AppContainer.updateForgeState(ForgeState.Idle)
     }
 
     fun startForgeAnalysis(
@@ -394,94 +550,23 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     ) {
         val cleanCmd = commandName.trim()
         if (cleanCmd.isBlank()) {
-            _forgeState.value = ForgeState.Error("Enter a command name (e.g. ufw, docker, nginx, ffmpeg).")
+            AppContainer.updateForgeState(ForgeState.Error("Enter a command name (e.g. ufw, docker, nginx, ffmpeg)."))
             return
         }
+        val osHint = (_connectionState.value as? SshConnectionState.Connected)?.env?.osName ?: "POSIX"
+        haptics.tick()
+        AppContainer.startForgePipeline(
+            context = getApplication(),
+            commandName = cleanCmd,
+            sourceMode = sourceMode,
+            manualDocs = manualDocsText,
+            osHint = osHint,
+            bypassCheck = bypassExistingCheck
+        )
+    }
 
-        viewModelScope.launch {
-            haptics.tick()
-            try {
-                if (!bypassExistingCheck) {
-                    val gh = githubConfig.value
-                    if (gh.isConfigured) {
-                        _forgeState.value = ForgeState.CheckingGitHub(cleanCmd)
-                        val remoteMatch = runCatching {
-                            gitHubClient.findExistingPlugin(cleanCmd, gh)
-                        }.getOrNull()
-                        if (remoteMatch != null) {
-                            _forgeState.value = ForgeState.FoundExistingRemote(
-                                commandName = cleanCmd,
-                                plugin = remoteMatch.first,
-                                sourcePath = "${gh.ownerRepo}/${remoteMatch.second}"
-                            )
-                            haptics.success()
-                            return@launch
-                        }
-                    }
-
-                    val localMatch = repository.findLocalPluginByCommand(cleanCmd)
-                    if (localMatch != null) {
-                        _forgeState.value = ForgeState.FoundExistingRemote(
-                            commandName = cleanCmd,
-                            plugin = localMatch,
-                            sourcePath = "Local Plugin Store"
-                        )
-                        haptics.success()
-                        return@launch
-                    }
-                }
-
-                val docsToAnalyze = when (sourceMode) {
-                    PluginAnalysisSource.SSH_PROBE -> {
-                        if (!sshEngine.isConnected()) {
-                            _forgeState.value = ForgeState.Error(
-                                "No active SSH host connected. Connect a host in Workspace or switch source to Manual Docs."
-                            )
-                            haptics.warning()
-                            return@launch
-                        }
-                        _forgeState.value = ForgeState.ProbingSshDocs(cleanCmd)
-                        sshEngine.probeCommandDocumentation(cleanCmd)
-                    }
-                    PluginAnalysisSource.MANUAL_DOCS -> {
-                        if (manualDocsText.isBlank()) {
-                            _forgeState.value = ForgeState.Error(
-                                "Paste `--help` or `man` documentation text to analyze."
-                            )
-                            return@launch
-                        }
-                        manualDocsText.trim()
-                    }
-                }
-
-                val activeLlm = llmConfig.value
-                val osHint = (_connectionState.value as? SshConnectionState.Connected)?.env?.osName ?: "POSIX"
-                val providerLabel = when (activeLlm.providerType) {
-                    LlmProviderType.FIREBASE_GEMINI -> "Gemini (${activeLlm.geminiModel})"
-                    LlmProviderType.OLLAMA_LOCAL -> "Ollama (${activeLlm.customModelName})"
-                    LlmProviderType.OPENAI_COMPATIBLE -> "Custom LLM (${activeLlm.customModelName})"
-                }
-                _forgeState.value = ForgeState.AnalyzingWithLlm(
-                    statusMessage = "Synthesizing GUI schema with $providerLabel...",
-                    rawDocsPreview = docsToAnalyze.take(600)
-                )
-
-                val generated = llmAnalyzer.analyzeCliDocumentation(
-                    commandName = cleanCmd,
-                    rawDocs = docsToAnalyze,
-                    remoteOsHint = osHint,
-                    config = activeLlm
-                )
-                _forgeState.value = ForgeState.Ready(generated, docsToAnalyze)
-                haptics.success()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Forge analysis failed", e)
-                _forgeState.value = ForgeState.Error(e.localizedMessage ?: "Plugin analysis failed.")
-                haptics.warning()
-            }
-        }
+    fun cancelForgeAnalysis() {
+        AppContainer.cancelForgePipeline()
     }
 
     fun savePlugin(plugin: CliPlugin, pushToGitHubIfEnabled: Boolean = true) {
@@ -640,9 +725,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     override fun onCleared() {
+        heartbeatJob?.cancel()
         super.onCleared()
-        viewModelScope.launch {
-            sshEngine.disconnect()
-        }
     }
 }
