@@ -2,10 +2,14 @@ package com.snehashis.data.llm
 
 import android.util.Log
 import com.snehashis.core.security.SecretCipher
+import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.CliDocCondenser
 import com.snehashis.domain.model.CliPlugin
+import com.snehashis.domain.model.DiscoveredLlmModel
+import com.snehashis.domain.model.EndpointTestResult
 import com.snehashis.domain.model.LlmBackendConfig
 import com.snehashis.domain.model.LlmProviderType
+import com.snehashis.domain.model.ModelCapabilityTag
 import com.snehashis.domain.model.OnDeviceModelStatus
 import com.snehashis.domain.model.ParameterType
 import com.snehashis.domain.model.PluginAction
@@ -117,14 +121,27 @@ class LlmPluginAnalyzer(
         }
     }
 
-    suspend fun testEndpoint(config: LlmBackendConfig): String = withContext(Dispatchers.IO) {
+    suspend fun testEndpoint(config: LlmBackendConfig): String =
+        testAndDiscoverModels(config).statusMessage
+
+    suspend fun testAndDiscoverModels(config: LlmBackendConfig): EndpointTestResult = withContext(Dispatchers.IO) {
         when (config.providerType) {
             LlmProviderType.FIREBASE_GEMINI -> {
                 val model by lazy { Firebase.ai.generativeModel(config.geminiModel) }
                 val response = withTimeout(30_000L) {
                     model.generateContent("Reply with exactly: OK")
                 }
-                "Firebase AI Logic (${config.geminiModel}) ready: ${response.text?.trim() ?: "OK"}"
+                val curated = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon").map { id ->
+                    DiscoveredLlmModel(
+                        id = id,
+                        ownedBy = "firebase-ai",
+                        tags = classifyModelTags(id, "firebase")
+                    )
+                }
+                EndpointTestResult(
+                    statusMessage = "Firebase AI Logic (${config.geminiModel}) ready: ${response.text?.trim() ?: "OK"}",
+                    discoveredModels = curated
+                )
             }
             LlmProviderType.OLLAMA_LOCAL -> {
                 val baseUrl = config.customEndpointUrl.trim().trimEnd('/')
@@ -134,9 +151,11 @@ class LlmPluginAnalyzer(
                 client.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
                     val body = resp.body?.string().orEmpty()
-                    val root = json.parseToJsonElement(body).jsonObject
-                    val count = root["models"]?.jsonArray?.size ?: 0
-                    "Ollama reachable ($count local models found)"
+                    val discovered = parseOllamaTagsResponse(body)
+                    EndpointTestResult(
+                        statusMessage = "Ollama reachable (${discovered.size} local models found)",
+                        discoveredModels = discovered
+                    )
                 }
             }
             LlmProviderType.OPENAI_COMPATIBLE -> {
@@ -151,13 +170,34 @@ class LlmPluginAnalyzer(
                 val apiKey = SecretCipher.decrypt(config.encryptedApiKey)
                 val reqBuilder = Request.Builder().url(modelsUrl).get()
                 if (apiKey.isNotBlank()) reqBuilder.header("Authorization", "Bearer $apiKey")
+                if (baseUrl.contains("openrouter.ai", ignoreCase = true)) {
+                    reqBuilder.header("HTTP-Referer", "https://shellcraft.local")
+                    reqBuilder.header("X-Title", "ShellCraft")
+                }
                 client.newCall(reqBuilder.build()).execute().use { resp ->
-                    if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
-                    "OpenAI-compatible endpoint reachable (HTTP ${resp.code})"
+                    val body = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        val hint = when (resp.code) {
+                            401, 403 -> "Invalid or missing API key for ${config.byokPreset.displayName}."
+                            429 -> "Rate limit reached (HTTP 429). Retry shortly."
+                            else -> resp.message
+                        }
+                        throw IllegalStateException("HTTP ${resp.code}: $hint")
+                    }
+                    val discovered = parseOpenAiModelsResponse(body, baseUrl)
+                    val presetName = if (config.byokPreset == ByokProviderPreset.CUSTOM) {
+                        "Endpoint"
+                    } else {
+                        config.byokPreset.displayName
+                    }
+                    EndpointTestResult(
+                        statusMessage = "$presetName connected · ${discovered.size} models discovered",
+                        discoveredModels = discovered
+                    )
                 }
             }
             LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL -> {
-                onDeviceEngine.warmupAndTest()
+                EndpointTestResult(statusMessage = onDeviceEngine.warmupAndTest())
             }
         }
     }
@@ -301,6 +341,10 @@ class LlmPluginAnalyzer(
         if (apiKey.isNotBlank()) {
             reqBuilder.header("Authorization", "Bearer $apiKey")
         }
+        if (baseUrl.contains("openrouter.ai", ignoreCase = true)) {
+            reqBuilder.header("HTTP-Referer", "https://shellcraft.local")
+            reqBuilder.header("X-Title", "ShellCraft")
+        }
 
         val contentBuilder = StringBuilder()
         var reasoningChars = 0
@@ -309,7 +353,13 @@ class LlmPluginAnalyzer(
             withTimeout(timeoutMs) {
                 client.newCall(reqBuilder.build()).execute().use { resp ->
                     if (!resp.isSuccessful) {
-                        throw IllegalStateException("Provider error HTTP ${resp.code}: ${resp.body?.string()?.take(240)}")
+                        val errSnippet = resp.body?.string()?.take(240).orEmpty()
+                        val hint = when (resp.code) {
+                            401, 403 -> "Authentication failed — check your ${config.byokPreset.displayName} API key in Settings."
+                            429 -> "Free-tier rate limit hit (HTTP 429). Wait briefly or pick another model."
+                            else -> errSnippet
+                        }
+                        throw IllegalStateException("Provider error HTTP ${resp.code}: $hint")
                     }
                     val stream = resp.body?.byteStream() ?: throw IllegalStateException("Empty provider stream")
                     BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { reader ->
@@ -579,6 +629,115 @@ $condensedDocs
 
         private const val ON_DEVICE_NANO_SYSTEM_PROMPT =
             "You are a POSIX CLI-to-GUI compiler. Output ONLY a single compact valid JSON object matching the schema. Do not include markdown fences or explanations."
+
+        private val parserJson = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+        }
+
+        fun classifyModelTags(modelId: String, baseUrl: String = ""): Set<ModelCapabilityTag> {
+            val lower = modelId.lowercase()
+            val tags = mutableSetOf<ModelCapabilityTag>()
+            if (lower.endsWith(":free") ||
+                baseUrl.contains("generativelanguage.googleapis.com", ignoreCase = true) ||
+                baseUrl.contains("api.groq.com", ignoreCase = true)
+            ) {
+                tags.add(ModelCapabilityTag.FREE)
+            }
+            if (lower.contains("coder") || lower.contains("codestral") ||
+                lower.contains("devstral") || lower.contains("deepseek-coder") ||
+                lower.contains("qwen2.5-coder") || lower.contains("qwen3-coder")
+            ) {
+                tags.add(ModelCapabilityTag.CODER)
+            }
+            if (lower.contains("r1") || lower.contains("thinking") ||
+                lower.contains("reason") || lower.contains("qwq") ||
+                lower.contains("nemotron-ultra") || lower.contains("argon")
+            ) {
+                tags.add(ModelCapabilityTag.REASONING)
+            }
+            if (lower.contains("flash") || lower.contains("lite") ||
+                lower.contains("mini") || lower.contains("instant") ||
+                lower.contains("-8b") || lower.contains(":8b") || lower.contains("3b")
+            ) {
+                tags.add(ModelCapabilityTag.FAST)
+            }
+            return tags
+        }
+
+        fun parseOpenAiModelsResponse(rawJson: String, baseUrl: String = ""): List<DiscoveredLlmModel> {
+            val root = runCatching { parserJson.parseToJsonElement(rawJson).jsonObject }.getOrNull()
+                ?: return emptyList()
+            val items = root["data"]?.jsonArray ?: root["models"]?.jsonArray ?: return emptyList()
+            val isGoogleAiStudio = baseUrl.contains("generativelanguage.googleapis.com", ignoreCase = true)
+
+            val parsed = items.mapNotNull { el ->
+                val obj = runCatching { el.jsonObject }.getOrNull() ?: return@mapNotNull null
+                val rawId = obj["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (rawId.isBlank()) return@mapNotNull null
+
+                // Skip explicitly inactive entries (e.g. Groq deactivated weights)
+                val activeFlag = obj["active"]?.jsonPrimitive?.contentOrNull
+                if (activeFlag == "false") return@mapNotNull null
+
+                val cleanId = if (isGoogleAiStudio && rawId.startsWith("models/")) {
+                    rawId.removePrefix("models/")
+                } else {
+                    rawId
+                }
+
+                // Filter out pure embedding/rerank/audio/image generation models from text completion list
+                val lower = cleanId.lowercase()
+                if (lower.contains("embedding") || lower.contains("rerank") ||
+                    lower.contains("imagen") || lower.contains("veo") ||
+                    lower.contains("whisper") || lower.contains("tts") ||
+                    lower == "models/aqa" || lower == "aqa"
+                ) {
+                    return@mapNotNull null
+                }
+
+                val ownedBy = obj["owned_by"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                val tags = classifyModelTags(cleanId, baseUrl).toMutableSet()
+                val pricingPrompt = runCatching {
+                    obj["pricing"]?.jsonObject?.get("prompt")?.jsonPrimitive?.contentOrNull
+                }.getOrNull()
+                if (pricingPrompt == "0" || pricingPrompt == "0.0") {
+                    tags.add(ModelCapabilityTag.FREE)
+                }
+
+                DiscoveredLlmModel(id = cleanId, ownedBy = ownedBy, tags = tags)
+            }.distinctBy { it.id }
+
+            return parsed.sortedWith(
+                compareByDescending<DiscoveredLlmModel> { ModelCapabilityTag.FREE in it.tags }
+                    .thenByDescending { ModelCapabilityTag.CODER in it.tags }
+                    .thenByDescending { ModelCapabilityTag.FAST in it.tags }
+                    .thenBy { it.id.lowercase() }
+            )
+        }
+
+        fun parseOllamaTagsResponse(rawJson: String): List<DiscoveredLlmModel> {
+            val root = runCatching { parserJson.parseToJsonElement(rawJson).jsonObject }.getOrNull()
+                ?: return emptyList()
+            val models = root["models"]?.jsonArray ?: return emptyList()
+            return models.mapNotNull { el ->
+                val obj = runCatching { el.jsonObject }.getOrNull() ?: return@mapNotNull null
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (name.isBlank()) return@mapNotNull null
+                val family = runCatching {
+                    obj["details"]?.jsonObject?.get("family")?.jsonPrimitive?.contentOrNull
+                }.getOrNull().orEmpty()
+                DiscoveredLlmModel(
+                    id = name,
+                    ownedBy = family.ifBlank { "ollama" },
+                    tags = classifyModelTags(name, "ollama")
+                )
+            }.distinctBy { it.id }
+                .sortedWith(
+                    compareByDescending<DiscoveredLlmModel> { ModelCapabilityTag.CODER in it.tags }
+                        .thenBy { it.id.lowercase() }
+                )
+        }
     }
 
     @Serializable

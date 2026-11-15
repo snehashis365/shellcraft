@@ -150,6 +150,7 @@ fun ShellCraftApp(
     val pendingExecution by viewModel.pendingExecution.collectAsStateWithLifecycle()
     val terminalState by viewModel.terminalState.collectAsStateWithLifecycle()
     val bannerMessage by viewModel.bannerMessage.collectAsStateWithLifecycle()
+    val modelDiscoveryState by viewModel.modelDiscoveryState.collectAsStateWithLifecycle()
 
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -446,10 +447,12 @@ fun ShellCraftApp(
                                     onDeviceStatus = onDeviceStatus,
                                     onRefreshOnDeviceStatus = { viewModel.refreshOnDeviceStatus() },
                                     onDownloadOnDeviceModel = { viewModel.downloadOnDeviceModel() },
-                                    onSaveLlmConfig = { p, gm, url, cm, key, to, fbEn, fbProv, cond, temp ->
-                                        viewModel.saveLlmBackend(p, gm, url, cm, key, to, fbEn, fbProv, cond, temp)
+                                    onSaveLlmConfig = { p, preset, gm, url, cm, key, to, fbEn, fbProv, cond, temp ->
+                                        viewModel.saveLlmBackend(p, preset, gm, url, cm, key, to, fbEn, fbProv, cond, temp)
                                     },
-                                    onTestLlmConfig = { cfg -> viewModel.testLlmBackend(cfg) },
+                                    onTestLlmConfig = { cfg -> viewModel.testAndDiscoverModels(cfg) },
+                                    modelDiscoveryState = modelDiscoveryState,
+                                    onClearModelDiscovery = { viewModel.clearModelDiscovery() },
                                     onSaveGitHubConfig = { en, repo, br, dir, pat, pol ->
                                         viewModel.saveGitHubSettings(en, repo, br, dir, pat, pol)
                                     },

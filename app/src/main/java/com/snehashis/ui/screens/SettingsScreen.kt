@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,20 +24,24 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.NetworkCheck
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -53,18 +58,26 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.snehashis.core.security.SecretCipher
 import com.snehashis.data.local.SecuritySettings
+import com.snehashis.domain.model.ByokProviderPreset
+import com.snehashis.domain.model.EndpointTestResult
 import com.snehashis.domain.model.GitHubRepoConfig
 import com.snehashis.domain.model.GitHubSyncPolicy
 import com.snehashis.domain.model.LlmBackendConfig
 import com.snehashis.domain.model.LlmProviderType
+import com.snehashis.domain.model.ModelDiscoveryState
 import com.snehashis.domain.model.OnDeviceModelStatus
+import com.snehashis.ui.components.ModelPickerDialog
 import com.snehashis.ui.components.SectionHeader
+import com.snehashis.ui.theme.JetBrainsMonoFontFamily
 import kotlinx.coroutines.launch
 
 @Composable
@@ -77,6 +90,7 @@ fun SettingsScreen(
     onDownloadOnDeviceModel: () -> Unit = {},
     onSaveLlmConfig: (
         LlmProviderType,
+        ByokProviderPreset,
         String,
         String,
         String,
@@ -87,7 +101,9 @@ fun SettingsScreen(
         Boolean,
         Float
     ) -> Unit,
-    onTestLlmConfig: suspend (LlmBackendConfig) -> Result<String>,
+    onTestLlmConfig: suspend (LlmBackendConfig) -> Result<EndpointTestResult>,
+    modelDiscoveryState: ModelDiscoveryState = ModelDiscoveryState.Idle,
+    onClearModelDiscovery: () -> Unit = {},
     onSaveGitHubConfig: (Boolean, String, String, String, String?, GitHubSyncPolicy) -> Unit,
     onSyncNow: () -> Unit,
     onUpdateSecurity: (SecuritySettings) -> Unit,
@@ -95,8 +111,10 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val uriHandler = LocalUriHandler.current
 
     var providerType by remember(llmConfig) { mutableStateOf(llmConfig.providerType) }
+    var byokPreset by remember(llmConfig) { mutableStateOf(llmConfig.byokPreset) }
     var geminiModel by remember(llmConfig) { mutableStateOf(llmConfig.geminiModel) }
     var customEndpoint by remember(llmConfig) { mutableStateOf(llmConfig.customEndpointUrl) }
     var customModel by remember(llmConfig) { mutableStateOf(llmConfig.customModelName) }
@@ -108,6 +126,7 @@ fun SettingsScreen(
     var onDeviceTemperature by remember(llmConfig) { mutableStateOf(llmConfig.onDeviceTemperature) }
     var llmTestResult by remember { mutableStateOf<String?>(null) }
     var isTestingLlm by remember { mutableStateOf(false) }
+    var showModelPicker by remember { mutableStateOf(false) }
 
     var ghEnabled by remember(githubConfig) { mutableStateOf(githubConfig.enabled) }
     var ghOwnerRepo by remember(githubConfig) { mutableStateOf(githubConfig.ownerRepo) }
@@ -118,6 +137,7 @@ fun SettingsScreen(
 
     LaunchedEffect(llmConfig) {
         providerType = llmConfig.providerType
+        byokPreset = llmConfig.byokPreset
         geminiModel = llmConfig.geminiModel
         customEndpoint = llmConfig.customEndpointUrl
         customModel = llmConfig.customModelName
@@ -131,6 +151,58 @@ fun SettingsScreen(
     LaunchedEffect(providerType) {
         if (providerType == LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL) {
             onRefreshOnDeviceStatus()
+        }
+    }
+
+    val resolvedEncryptedKeyForPreset = remember(customApiKey, byokPreset, llmConfig) {
+        when {
+            customApiKey.isNotBlank() -> SecretCipher.encrypt(customApiKey)
+            else -> llmConfig.presetSlots[byokPreset]?.encryptedApiKey?.takeIf { it.isNotBlank() }
+                ?: if (byokPreset == llmConfig.byokPreset) llmConfig.encryptedApiKey else ""
+        }
+    }
+
+    val hasSavedKeyForPreset = remember(byokPreset, llmConfig) {
+        llmConfig.presetSlots[byokPreset]?.encryptedApiKey?.isNotBlank() == true ||
+            (byokPreset == llmConfig.byokPreset && llmConfig.encryptedApiKey.isNotBlank())
+    }
+
+    val discoveredModels = (modelDiscoveryState as? ModelDiscoveryState.Ready)?.models.orEmpty()
+
+    val runTestAndDiscover: () -> Unit = {
+        isTestingLlm = true
+        llmTestResult = null
+        val candidate = LlmBackendConfig(
+            providerType = providerType,
+            byokPreset = byokPreset,
+            geminiModel = geminiModel,
+            customEndpointUrl = customEndpoint,
+            customModelName = customModel,
+            encryptedApiKey = if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
+                resolvedEncryptedKeyForPreset
+            } else {
+                ""
+            },
+            presetSlots = llmConfig.presetSlots,
+            timeoutSeconds = timeoutSeconds,
+            onDeviceFallbackEnabled = onDeviceFallbackEnabled,
+            onDeviceFallbackProvider = onDeviceFallbackProvider,
+            onDeviceCondenseDocs = onDeviceCondenseDocs,
+            onDeviceTemperature = onDeviceTemperature
+        )
+        scope.launch {
+            val res = onTestLlmConfig(candidate)
+            res.onSuccess { result ->
+                llmTestResult = result.statusMessage
+                if (result.discoveredModels.isNotEmpty() &&
+                    (customModel.isBlank() || result.discoveredModels.none { it.id == customModel })
+                ) {
+                    customModel = result.discoveredModels.first().id
+                }
+            }.onFailure { err ->
+                llmTestResult = "Test failed: ${err.localizedMessage}"
+            }
+            isTestingLlm = false
         }
     }
 
@@ -183,14 +255,50 @@ fun SettingsScreen(
                             )
                             FilterChip(
                                 selected = providerType == LlmProviderType.OLLAMA_LOCAL,
-                                onClick = { providerType = LlmProviderType.OLLAMA_LOCAL },
+                                onClick = {
+                                    if (providerType != LlmProviderType.OLLAMA_LOCAL) {
+                                        providerType = LlmProviderType.OLLAMA_LOCAL
+                                        if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL &&
+                                            llmConfig.customEndpointUrl.isNotBlank()
+                                        ) {
+                                            customEndpoint = llmConfig.customEndpointUrl
+                                            customModel = llmConfig.customModelName
+                                        } else if (customEndpoint.startsWith("https://") ||
+                                            ByokProviderPreset.entries.any { customEndpoint == it.defaultBaseUrl }
+                                        ) {
+                                            customEndpoint = "http://192.168.1.100:11434"
+                                            customModel = "qwen2.5-coder:7b"
+                                        }
+                                        llmTestResult = null
+                                        onClearModelDiscovery()
+                                    }
+                                },
                                 label = { Text("Local Ollama") },
                                 modifier = Modifier.testTag("llm_ollama_chip")
                             )
                             FilterChip(
                                 selected = providerType == LlmProviderType.OPENAI_COMPATIBLE,
-                                onClick = { providerType = LlmProviderType.OPENAI_COMPATIBLE },
-                                label = { Text("OpenAI-Compatible") },
+                                onClick = {
+                                    if (providerType != LlmProviderType.OPENAI_COMPATIBLE) {
+                                        providerType = LlmProviderType.OPENAI_COMPATIBLE
+                                        val slot = llmConfig.presetSlots[byokPreset]
+                                        customEndpoint = slot?.endpointUrl?.takeIf { it.isNotBlank() }
+                                            ?: if (llmConfig.providerType == LlmProviderType.OPENAI_COMPATIBLE &&
+                                                llmConfig.customEndpointUrl.isNotBlank()
+                                            ) llmConfig.customEndpointUrl else byokPreset.defaultBaseUrl
+                                        customModel = slot?.modelName?.takeIf { it.isNotBlank() }
+                                            ?: if (llmConfig.providerType == LlmProviderType.OPENAI_COMPATIBLE &&
+                                                llmConfig.customModelName.isNotBlank()
+                                            ) llmConfig.customModelName else byokPreset.defaultModel
+                                        customApiKey = ""
+                                        llmTestResult = null
+                                        onClearModelDiscovery()
+                                    }
+                                },
+                                label = { Text("BYOK Cloud (API)") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                                },
                                 modifier = Modifier.testTag("llm_openai_chip")
                             )
                             FilterChip(
@@ -219,7 +327,7 @@ fun SettingsScreen(
                                     }
                                 }
                                 Text(
-                                    text = "Uses Firebase AI Logic with App Check attestation (no API key). Note: Sideloaded debug APKs on a physical phone require registering your phone's Logcat App Check debug secret in Firebase Console, or using OpenAI-Compatible mode.",
+                                    text = "Uses Firebase AI Logic with App Check attestation (no API key). To use your own free API key quota instead, choose BYOK Cloud (API) → Gemini AI Studio.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -242,6 +350,79 @@ fun SettingsScreen(
                             }
 
                             LlmProviderType.OLLAMA_LOCAL, LlmProviderType.OPENAI_COMPATIBLE -> {
+                                if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
+                                    Text(
+                                        text = "Provider Preset (Free Key Tiers & OpenAI-Compatible Endpoints)",
+                                        style = MaterialTheme.typography.labelLarge
+                                    )
+                                    Row(
+                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        ByokProviderPreset.entries.forEach { preset ->
+                                            FilterChip(
+                                                selected = byokPreset == preset,
+                                                onClick = {
+                                                    byokPreset = preset
+                                                    val slot = llmConfig.presetSlots[preset]
+                                                    customEndpoint = slot?.endpointUrl?.takeIf { it.isNotBlank() }
+                                                        ?: preset.defaultBaseUrl
+                                                    customModel = slot?.modelName?.takeIf { it.isNotBlank() }
+                                                        ?: preset.defaultModel
+                                                    customApiKey = ""
+                                                    llmTestResult = null
+                                                    onClearModelDiscovery()
+                                                },
+                                                label = { Text(preset.displayName) },
+                                                modifier = Modifier.testTag("byok_preset_${preset.name.lowercase()}")
+                                            )
+                                        }
+                                    }
+
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                        shape = MaterialTheme.shapes.small,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("byok_preset_info_card")
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = byokPreset.freeTierSummary,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (byokPreset.apiKeyPortalUrl.isNotBlank()) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                OutlinedButton(
+                                                    onClick = {
+                                                        runCatching { uriHandler.openUri(byokPreset.apiKeyPortalUrl) }
+                                                    },
+                                                    modifier = Modifier
+                                                        .heightIn(min = 48.dp)
+                                                        .testTag("byok_get_key_button")
+                                                ) {
+                                                    Icon(
+                                                        Icons.AutoMirrored.Filled.OpenInNew,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(15.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(4.dp))
+                                                    Text("Get Free Key")
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 OutlinedTextField(
                                     value = customEndpoint,
                                     onValueChange = { customEndpoint = it },
@@ -249,34 +430,156 @@ fun SettingsScreen(
                                     placeholder = {
                                         Text(
                                             if (providerType == LlmProviderType.OLLAMA_LOCAL) "http://192.168.1.100:11434"
-                                            else "http://192.168.1.100:1234"
+                                            else byokPreset.defaultBaseUrl
                                         )
+                                    },
+                                    trailingIcon = {
+                                        if (providerType == LlmProviderType.OPENAI_COMPATIBLE &&
+                                            customEndpoint != byokPreset.defaultBaseUrl
+                                        ) {
+                                            IconButton(
+                                                onClick = { customEndpoint = byokPreset.defaultBaseUrl }
+                                            ) {
+                                                Icon(
+                                                    Icons.Filled.Refresh,
+                                                    contentDescription = "Reset URL to preset default"
+                                                )
+                                            }
+                                        }
                                     },
                                     singleLine = true,
                                     modifier = Modifier.fillMaxWidth().testTag("llm_endpoint_input")
                                 )
-                                OutlinedTextField(
-                                    value = customModel,
-                                    onValueChange = { customModel = it },
-                                    label = { Text("Model Name") },
-                                    placeholder = { Text("qwen/qwen3.6-35b-a3b") },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth().testTag("llm_model_input")
-                                )
+
                                 if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
                                     OutlinedTextField(
                                         value = customApiKey,
                                         onValueChange = { customApiKey = it },
                                         label = {
                                             Text(
-                                                if (llmConfig.encryptedApiKey.isBlank()) "API Key (optional for LM Studio / vLLM)"
-                                                else "New API Key (leave blank to keep existing)"
+                                                if (hasSavedKeyForPreset) {
+                                                    "Saved for ${byokPreset.displayName} — leave blank to keep"
+                                                } else {
+                                                    "API Key (${byokPreset.keyHint})"
+                                                }
                                             )
                                         },
+                                        placeholder = { Text(byokPreset.keyHint) },
                                         visualTransformation = PasswordVisualTransformation(),
                                         singleLine = true,
                                         modifier = Modifier.fillMaxWidth().testTag("llm_apikey_input")
                                     )
+                                }
+
+                                // Dynamic Model Selector Card + Quick-Pick Chips
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                    shape = MaterialTheme.shapes.medium,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 56.dp)
+                                        .clip(MaterialTheme.shapes.medium)
+                                        .clickable { showModelPicker = true }
+                                        .testTag("model_selector_card")
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Text(
+                                                text = "Active Model",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                            Text(
+                                                text = customModel.ifBlank { "Tap to browse or type model ID" },
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    fontFamily = JetBrainsMonoFontFamily,
+                                                    fontWeight = FontWeight.SemiBold
+                                                ),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.testTag("active_model_value")
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            shape = MaterialTheme.shapes.small
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Filled.Tune,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Text(
+                                                    text = if (discoveredModels.isNotEmpty()) {
+                                                        "Browse (${discoveredModels.size})"
+                                                    } else {
+                                                        "Pick / Type"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (modelDiscoveryState is ModelDiscoveryState.Discovering) {
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                }
+
+                                if (discoveredModels.isNotEmpty()) {
+                                    Text(
+                                        text = "Quick Pick (${discoveredModels.size} models live from endpoint)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Row(
+                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        discoveredModels.take(8).forEach { model ->
+                                            FilterChip(
+                                                selected = customModel == model.id,
+                                                onClick = { customModel = model.id },
+                                                label = {
+                                                    Text(
+                                                        text = model.id,
+                                                        style = MaterialTheme.typography.labelMedium.copy(
+                                                            fontFamily = JetBrainsMonoFontFamily
+                                                        ),
+                                                        maxLines = 1
+                                                    )
+                                                },
+                                                modifier = Modifier.testTag("quick_model_${model.id}")
+                                            )
+                                        }
+                                        if (discoveredModels.size > 8) {
+                                            FilterChip(
+                                                selected = false,
+                                                onClick = { showModelPicker = true },
+                                                label = { Text("All ${discoveredModels.size}...") },
+                                                modifier = Modifier.testTag("quick_model_more")
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -300,40 +603,18 @@ fun SettingsScreen(
                             Text(
                                 text = llmTestResult!!,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.secondary
+                                color = if (llmTestResult!!.startsWith("Test failed", ignoreCase = true)) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.secondary
+                                },
+                                modifier = Modifier.testTag("llm_test_result_text")
                             )
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
-                                onClick = {
-                                    isTestingLlm = true
-                                    llmTestResult = null
-                                    val candidate = LlmBackendConfig(
-                                        providerType = providerType,
-                                        geminiModel = geminiModel,
-                                        customEndpointUrl = customEndpoint,
-                                        customModelName = customModel,
-                                        encryptedApiKey = if (customApiKey.isNotBlank()) {
-                                            SecretCipher.encrypt(customApiKey)
-                                        } else {
-                                            llmConfig.encryptedApiKey
-                                        },
-                                        timeoutSeconds = timeoutSeconds,
-                                        onDeviceFallbackEnabled = onDeviceFallbackEnabled,
-                                        onDeviceFallbackProvider = onDeviceFallbackProvider,
-                                        onDeviceCondenseDocs = onDeviceCondenseDocs,
-                                        onDeviceTemperature = onDeviceTemperature
-                                    )
-                                    scope.launch {
-                                        val res = onTestLlmConfig(candidate)
-                                        llmTestResult = res.fold(
-                                            onSuccess = { it },
-                                            onFailure = { "Test failed: ${it.localizedMessage}" }
-                                        )
-                                        isTestingLlm = false
-                                    }
-                                },
+                                onClick = runTestAndDiscover,
                                 enabled = !isTestingLlm,
                                 modifier = Modifier.heightIn(min = 48.dp).testTag("test_llm_button")
                             ) {
@@ -343,12 +624,19 @@ fun SettingsScreen(
                                     Icon(Icons.Filled.NetworkCheck, contentDescription = null, modifier = Modifier.size(18.dp))
                                 }
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Text(if (providerType == LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL) "Warm Up & Test" else "Test")
+                                Text(
+                                    when (providerType) {
+                                        LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL -> "Warm Up & Test"
+                                        LlmProviderType.FIREBASE_GEMINI -> "Test"
+                                        LlmProviderType.OLLAMA_LOCAL, LlmProviderType.OPENAI_COMPATIBLE -> "Test & Fetch Models"
+                                    }
+                                )
                             }
                             Button(
                                 onClick = {
                                     onSaveLlmConfig(
                                         providerType,
+                                        byokPreset,
                                         geminiModel,
                                         customEndpoint,
                                         customModel,
@@ -359,6 +647,7 @@ fun SettingsScreen(
                                         onDeviceCondenseDocs,
                                         onDeviceTemperature
                                     )
+                                    customApiKey = ""
                                 },
                                 modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("save_llm_button")
                             ) {
@@ -557,6 +846,23 @@ fun SettingsScreen(
             }
         }
     }
+
+    if (showModelPicker) {
+        val providerTitle = if (providerType == LlmProviderType.OLLAMA_LOCAL) {
+            "Local Ollama"
+        } else {
+            byokPreset.displayName
+        }
+        ModelPickerDialog(
+            providerTitle = providerTitle,
+            currentModel = customModel,
+            discoveredModels = discoveredModels,
+            isRefreshing = isTestingLlm || modelDiscoveryState is ModelDiscoveryState.Discovering,
+            onRefreshModels = runTestAndDiscover,
+            onSelectModel = { chosen -> customModel = chosen },
+            onDismiss = { showModelPicker = false }
+        )
+    }
 }
 
 @Composable
@@ -745,7 +1051,7 @@ private fun OnDeviceNanoConfigSection(
                         listOf(
                             LlmProviderType.FIREBASE_GEMINI to "Cloud Gemini",
                             LlmProviderType.OLLAMA_LOCAL to "Local Ollama",
-                            LlmProviderType.OPENAI_COMPATIBLE to "OpenAI-Compatible"
+                            LlmProviderType.OPENAI_COMPATIBLE to "BYOK Cloud (API)"
                         ).forEach { (type, label) ->
                             FilterChip(
                                 selected = fallbackProvider == type,

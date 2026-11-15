@@ -149,7 +149,7 @@ fun ForgeScreen(
     val activeBackendLabel = when (llmConfig.providerType) {
         LlmProviderType.FIREBASE_GEMINI -> "Gemini (${llmConfig.geminiModel})"
         LlmProviderType.OLLAMA_LOCAL -> "Ollama (${llmConfig.customModelName})"
-        LlmProviderType.OPENAI_COMPATIBLE -> "Custom LLM (${llmConfig.customModelName})"
+        LlmProviderType.OPENAI_COMPATIBLE -> "${llmConfig.byokPreset.displayName} (${llmConfig.customModelName})"
         LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL -> "On-Device Gemini Nano (Exp.)"
     }
 

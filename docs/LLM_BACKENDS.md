@@ -35,14 +35,23 @@ ShellCraft decouples CLI-to-GUI synthesis from any single AI vendor. You can swi
 
 ---
 
-## 3. LM Studio / vLLM / OpenAI-Compatible Servers
+## 3. BYOK Cloud Presets & OpenAI-Compatible APIs (Free Tiers & Self-Hosted)
 
-1. Start your local inference server (e.g. LM Studio Local Server on port `1234`, or a Tailscale/Cloudflare HTTPS proxy).
-2. In ShellCraft **Settings → LLM Backend**, select **OpenAI-Compatible API**:
-   - **Endpoint URL**: Base URL such as `http://192.168.1.50:1234` or `https://api.example.com/v1` (ShellCraft automatically avoids double `/v1` if `/v1` or `/openai` is already present).
-   - **Model Name**: Exact model ID served by `/models` (e.g. `qwen/qwen3.6-35b-a3b`, `google/gemma-4-12b-qat`).
-   - **Bearer API Key**: Optional; encrypted locally with `AndroidKeyStore`.
-3. Tap **Test Connection** (`GET /v1/models`) to confirm reachability.
+Not everyone can host a local GPU server or absorb developer billing on a managed Firebase project. Under **Settings → BYOK Cloud (API)**, ShellCraft provides one-tap presets with **per-provider isolated credentials** (encrypted via `AndroidKeyStore`) and a **Get Free Key** link to each provider's API-key portal:
+
+| Preset | Base URL | Free Tier Highlights | Key Portal |
+| :--- | :--- | :--- | :--- |
+| **Gemini AI Studio** | `https://generativelanguage.googleapis.com/v1beta/openai` | Use your own Google AI Studio free-tier key (`AIza...`) with no Firebase App Check required | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| **NVIDIA NIM** | `https://integrate.api.nvidia.com/v1` | Free developer program credits for `DeepSeek-R1`, `Qwen`, `Llama`, and `Nemotron` | [build.nvidia.com](https://build.nvidia.com/) |
+| **Groq** | `https://api.groq.com/openai/v1` | Ultra-fast LPU free tier (~30 RPM, no credit card needed) | [console.groq.com/keys](https://console.groq.com/keys) |
+| **OpenRouter** | `https://openrouter.ai/api/v1` | Unified gateway with zero-cost `:free` community endpoints | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| **Custom URL** | e.g. `http://192.168.1.50:1234` | LM Studio, vLLM, llama.cpp, or any self-hosted OpenAI-compatible proxy | — |
+
+### Live `/models` & `/api/tags` Model Discovery
+
+1. Select a preset (or **Local Ollama**), enter your endpoint / API key, and tap **Test & Fetch Models**.
+2. ShellCraft queries `GET /models` (or `GET /api/tags` on Ollama), filters out non-chat embedding/image/audio weights, strips Google AI Studio's `models/` prefix automatically, and populates **Quick Pick** chips directly in Settings.
+3. Tap the **Active Model** selector card to open the searchable **Model Picker** dialog with capability filter pills (`FREE`, `CODER`, `THINK`, `FAST`) plus a manual **Custom Model ID** override if needed.
 
 ---
 

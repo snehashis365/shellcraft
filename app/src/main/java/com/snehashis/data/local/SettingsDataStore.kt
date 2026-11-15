@@ -11,10 +11,12 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.snehashis.core.security.SecretCipher
+import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.GitHubRepoConfig
 import com.snehashis.domain.model.GitHubSyncPolicy
 import com.snehashis.domain.model.LlmBackendConfig
 import com.snehashis.domain.model.LlmProviderType
+import com.snehashis.domain.model.PresetCredentialSlot
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -31,6 +33,7 @@ class SettingsDataStore(private val context: Context) {
 
     private object Keys {
         val LLM_PROVIDER = stringPreferencesKey("llm_provider")
+        val BYOK_PRESET = stringPreferencesKey("byok_preset")
         val GEMINI_MODEL = stringPreferencesKey("gemini_model")
         val CUSTOM_ENDPOINT = stringPreferencesKey("custom_endpoint")
         val CUSTOM_MODEL = stringPreferencesKey("custom_model")
@@ -40,6 +43,10 @@ class SettingsDataStore(private val context: Context) {
         val ON_DEVICE_FALLBACK_PROVIDER = stringPreferencesKey("on_device_fallback_provider")
         val ON_DEVICE_CONDENSE_DOCS = booleanPreferencesKey("on_device_condense_docs")
         val ON_DEVICE_TEMPERATURE = floatPreferencesKey("on_device_temperature")
+
+        fun presetUrlKey(preset: ByokProviderPreset) = stringPreferencesKey("preset_url_${preset.name}")
+        fun presetModelKey(preset: ByokProviderPreset) = stringPreferencesKey("preset_model_${preset.name}")
+        fun presetEncryptedKey(preset: ByokProviderPreset) = stringPreferencesKey("preset_key_${preset.name}")
 
         val GH_ENABLED = booleanPreferencesKey("gh_enabled")
         val GH_OWNER_REPO = stringPreferencesKey("gh_owner_repo")
@@ -56,14 +63,65 @@ class SettingsDataStore(private val context: Context) {
     }
 
     val llmConfigFlow: Flow<LlmBackendConfig> = context.dataStore.data.map { prefs ->
+        val provider = runCatching {
+            LlmProviderType.valueOf(prefs[Keys.LLM_PROVIDER] ?: LlmProviderType.FIREBASE_GEMINI.name)
+        }.getOrDefault(LlmProviderType.FIREBASE_GEMINI)
+
+        val activePreset = runCatching {
+            ByokProviderPreset.valueOf(prefs[Keys.BYOK_PRESET] ?: ByokProviderPreset.GEMINI_AI_STUDIO.name)
+        }.getOrDefault(ByokProviderPreset.GEMINI_AI_STUDIO)
+
+        val legacyUrl = prefs[Keys.CUSTOM_ENDPOINT] ?: "http://192.168.1.100:11434"
+        val legacyModel = prefs[Keys.CUSTOM_MODEL] ?: "qwen2.5-coder:7b"
+        val legacyKey = prefs[Keys.ENCRYPTED_LLM_KEY] ?: ""
+
+        val slots = ByokProviderPreset.entries.associateWith { preset ->
+            val fallbackUrl = if (preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetUrlKey(preset))) {
+                legacyUrl
+            } else {
+                preset.defaultBaseUrl
+            }
+            val fallbackModel = if (preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetModelKey(preset))) {
+                legacyModel
+            } else {
+                preset.defaultModel
+            }
+            val fallbackKey = if (preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetEncryptedKey(preset))) {
+                legacyKey
+            } else {
+                ""
+            }
+            PresetCredentialSlot(
+                endpointUrl = prefs[Keys.presetUrlKey(preset)] ?: fallbackUrl,
+                modelName = prefs[Keys.presetModelKey(preset)] ?: fallbackModel,
+                encryptedApiKey = prefs[Keys.presetEncryptedKey(preset)] ?: fallbackKey
+            )
+        }
+
+        val resolvedUrl = if (provider == LlmProviderType.OPENAI_COMPATIBLE) {
+            slots[activePreset]?.endpointUrl ?: legacyUrl
+        } else {
+            legacyUrl
+        }
+        val resolvedModel = if (provider == LlmProviderType.OPENAI_COMPATIBLE) {
+            slots[activePreset]?.modelName ?: legacyModel
+        } else {
+            legacyModel
+        }
+        val resolvedKey = if (provider == LlmProviderType.OPENAI_COMPATIBLE) {
+            slots[activePreset]?.encryptedApiKey ?: legacyKey
+        } else {
+            legacyKey
+        }
+
         LlmBackendConfig(
-            providerType = runCatching {
-                LlmProviderType.valueOf(prefs[Keys.LLM_PROVIDER] ?: LlmProviderType.FIREBASE_GEMINI.name)
-            }.getOrDefault(LlmProviderType.FIREBASE_GEMINI),
+            providerType = provider,
+            byokPreset = activePreset,
             geminiModel = prefs[Keys.GEMINI_MODEL] ?: "gemini-3.8-flash",
-            customEndpointUrl = prefs[Keys.CUSTOM_ENDPOINT] ?: "http://192.168.1.100:11434",
-            customModelName = prefs[Keys.CUSTOM_MODEL] ?: "qwen2.5-coder:7b",
-            encryptedApiKey = prefs[Keys.ENCRYPTED_LLM_KEY] ?: "",
+            customEndpointUrl = resolvedUrl,
+            customModelName = resolvedModel,
+            encryptedApiKey = resolvedKey,
+            presetSlots = slots,
             timeoutSeconds = prefs[Keys.LLM_TIMEOUT_SEC] ?: 240,
             onDeviceFallbackEnabled = prefs[Keys.ON_DEVICE_FALLBACK_ENABLED] ?: false,
             onDeviceFallbackProvider = runCatching {
@@ -101,6 +159,7 @@ class SettingsDataStore(private val context: Context) {
 
     suspend fun saveLlmConfig(
         providerType: LlmProviderType,
+        byokPreset: ByokProviderPreset = ByokProviderPreset.CUSTOM,
         geminiModel: String,
         customEndpointUrl: String,
         customModelName: String,
@@ -113,12 +172,28 @@ class SettingsDataStore(private val context: Context) {
     ) {
         context.dataStore.edit { prefs ->
             prefs[Keys.LLM_PROVIDER] = providerType.name
+            prefs[Keys.BYOK_PRESET] = byokPreset.name
             prefs[Keys.GEMINI_MODEL] = geminiModel.ifBlank { "gemini-3.8-flash" }
-            prefs[Keys.CUSTOM_ENDPOINT] = customEndpointUrl.trim().trimEnd('/')
-            prefs[Keys.CUSTOM_MODEL] = customModelName.trim()
-            if (plainApiKey != null) {
+            val cleanUrl = customEndpointUrl.trim().trimEnd('/')
+            val cleanModel = customModelName.trim()
+            prefs[Keys.CUSTOM_ENDPOINT] = cleanUrl
+            prefs[Keys.CUSTOM_MODEL] = cleanModel
+
+            if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
+                prefs[Keys.presetUrlKey(byokPreset)] = cleanUrl.ifBlank { byokPreset.defaultBaseUrl }
+                prefs[Keys.presetModelKey(byokPreset)] = cleanModel.ifBlank { byokPreset.defaultModel }
+                val existingSlotKey = prefs[Keys.presetEncryptedKey(byokPreset)] ?: ""
+                val resolvedEncryptedKey = if (plainApiKey != null) {
+                    if (plainApiKey.isBlank()) "" else SecretCipher.encrypt(plainApiKey)
+                } else {
+                    existingSlotKey
+                }
+                prefs[Keys.presetEncryptedKey(byokPreset)] = resolvedEncryptedKey
+                prefs[Keys.ENCRYPTED_LLM_KEY] = resolvedEncryptedKey
+            } else if (plainApiKey != null) {
                 prefs[Keys.ENCRYPTED_LLM_KEY] = if (plainApiKey.isBlank()) "" else SecretCipher.encrypt(plainApiKey)
             }
+
             prefs[Keys.LLM_TIMEOUT_SEC] = timeoutSeconds.coerceIn(30, 600)
             prefs[Keys.ON_DEVICE_FALLBACK_ENABLED] = onDeviceFallbackEnabled
             prefs[Keys.ON_DEVICE_FALLBACK_PROVIDER] = if (onDeviceFallbackProvider == LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL) {

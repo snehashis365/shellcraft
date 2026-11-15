@@ -11,6 +11,7 @@ import com.snehashis.data.llm.LlmPluginAnalyzer
 import com.snehashis.data.llm.OnDeviceNanoEngine
 import com.snehashis.data.repository.ShellCraftRepository
 import com.snehashis.data.ssh.SshEngine
+import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.ForgeState
 import com.snehashis.domain.model.LlmProviderType
 import com.snehashis.domain.model.OnDeviceModelStatus
@@ -184,7 +185,11 @@ object AppContainer {
                 val providerLabel = when (activeLlm.providerType) {
                     LlmProviderType.FIREBASE_GEMINI -> "Gemini (${activeLlm.geminiModel})"
                     LlmProviderType.OLLAMA_LOCAL -> "Ollama (${activeLlm.customModelName})"
-                    LlmProviderType.OPENAI_COMPATIBLE -> "Custom LLM (${activeLlm.customModelName})"
+                    LlmProviderType.OPENAI_COMPATIBLE -> {
+                        val prefix = if (activeLlm.byokPreset == ByokProviderPreset.CUSTOM) "Custom LLM"
+                        else activeLlm.byokPreset.displayName
+                        "$prefix (${activeLlm.customModelName})"
+                    }
                     LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL -> "Gemini Nano (On-Device Exp.)"
                 }
 

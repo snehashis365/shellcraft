@@ -10,7 +10,9 @@ import com.snehashis.core.security.SafetyGuard
 import com.snehashis.core.security.SecretCipher
 import com.snehashis.data.local.ExecutionLogEntity
 import com.snehashis.data.local.SecuritySettings
+import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.CliPlugin
+import com.snehashis.domain.model.EndpointTestResult
 import com.snehashis.domain.model.ForgeState
 import com.snehashis.domain.model.GitHubRepoConfig
 import com.snehashis.domain.model.GitHubSyncPolicy
@@ -18,6 +20,7 @@ import com.snehashis.domain.model.InteractivePrompt
 import com.snehashis.domain.model.InteractivePromptDetector
 import com.snehashis.domain.model.LlmBackendConfig
 import com.snehashis.domain.model.LlmProviderType
+import com.snehashis.domain.model.ModelDiscoveryState
 import com.snehashis.domain.model.OnDeviceModelStatus
 import com.snehashis.domain.model.PluginAction
 import com.snehashis.domain.model.PluginAnalysisSource
@@ -110,6 +113,9 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _bannerMessage = MutableStateFlow<String?>(null)
     val bannerMessage: StateFlow<String?> = _bannerMessage.asStateFlow()
+
+    private val _modelDiscoveryState = MutableStateFlow<ModelDiscoveryState>(ModelDiscoveryState.Idle)
+    val modelDiscoveryState: StateFlow<ModelDiscoveryState> = _modelDiscoveryState.asStateFlow()
 
     private var activeExecutionJob: Job? = null
     private var promptWatchJob: Job? = null
@@ -679,8 +685,13 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         AppContainer.downloadOnDeviceModel(getApplication())
     }
 
+    fun clearModelDiscovery() {
+        _modelDiscoveryState.value = ModelDiscoveryState.Idle
+    }
+
     fun saveLlmBackend(
         providerType: LlmProviderType,
+        byokPreset: ByokProviderPreset = ByokProviderPreset.CUSTOM,
         geminiModel: String,
         customEndpointUrl: String,
         customModelName: String,
@@ -694,6 +705,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             repository.settingsDataStore.saveLlmConfig(
                 providerType = providerType,
+                byokPreset = byokPreset,
                 geminiModel = geminiModel,
                 customEndpointUrl = customEndpointUrl,
                 customModelName = customModelName,
@@ -710,7 +722,26 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     suspend fun testLlmBackend(config: LlmBackendConfig): Result<String> {
-        return runCatching { llmAnalyzer.testEndpoint(config) }
+        return testAndDiscoverModels(config).map { it.statusMessage }
+    }
+
+    suspend fun testAndDiscoverModels(config: LlmBackendConfig): Result<EndpointTestResult> {
+        _modelDiscoveryState.value = ModelDiscoveryState.Discovering
+        return runCatching {
+            llmAnalyzer.testAndDiscoverModels(config)
+        }.onSuccess { res ->
+            _modelDiscoveryState.value = if (res.discoveredModels.isNotEmpty()) {
+                ModelDiscoveryState.Ready(res.discoveredModels, res.statusMessage)
+            } else {
+                ModelDiscoveryState.Idle
+            }
+            haptics.success()
+        }.onFailure { err ->
+            _modelDiscoveryState.value = ModelDiscoveryState.Error(
+                err.localizedMessage ?: "Failed to query endpoint."
+            )
+            haptics.warning()
+        }
     }
 
     fun saveGitHubSettings(

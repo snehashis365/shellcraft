@@ -276,4 +276,83 @@ class ShellCraftCoreTest {
         val closed = com.snehashis.domain.model.CliDocCondenser.repairJson(truncated)
         assertTrue(closed.endsWith("]}"))
     }
+
+    @Test
+    fun parseOpenAiModelsResponse_handlesGoogleStudioOpenRouterGroqAndNvidia() {
+        val aiStudioJson = """
+            {
+              "data": [
+                {"id": "models/gemini-2.5-flash", "owned_by": "google"},
+                {"id": "models/text-embedding-004", "owned_by": "google"},
+                {"id": "models/imagen-3.0-generate-002", "owned_by": "google"}
+              ]
+            }
+        """.trimIndent()
+        val aiStudioModels = com.snehashis.data.llm.LlmPluginAnalyzer.parseOpenAiModelsResponse(
+            aiStudioJson,
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        )
+        assertEquals(1, aiStudioModels.size)
+        assertEquals("gemini-2.5-flash", aiStudioModels.first().id)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.FREE in aiStudioModels.first().tags)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.FAST in aiStudioModels.first().tags)
+
+        val openRouterJson = """
+            {
+              "data": [
+                {"id": "openai/gpt-4o", "pricing": {"prompt": "0.0000025"}},
+                {"id": "deepseek/deepseek-r1", "pricing": {"prompt": "0"}},
+                {"id": "meta-llama/llama-3.3-70b-instruct:free", "pricing": {"prompt": "0"}}
+              ]
+            }
+        """.trimIndent()
+        val orModels = com.snehashis.data.llm.LlmPluginAnalyzer.parseOpenAiModelsResponse(
+            openRouterJson,
+            "https://openrouter.ai/api/v1"
+        )
+        assertEquals(3, orModels.size)
+        val deepseek = orModels.first { it.id == "deepseek/deepseek-r1" }
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.FREE in deepseek.tags)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.REASONING in deepseek.tags)
+        val paid = orModels.first { it.id == "openai/gpt-4o" }
+        assertFalse(com.snehashis.domain.model.ModelCapabilityTag.FREE in paid.tags)
+
+        val groqJson = """
+            {
+              "data": [
+                {"id": "whisper-large-v3", "owned_by": "OpenAI", "active": true},
+                {"id": "llama-3.1-70b-deactivated", "owned_by": "Meta", "active": false},
+                {"id": "qwen/qwen2.5-coder-32b", "owned_by": "Alibaba", "active": true}
+              ]
+            }
+        """.trimIndent()
+        val groqModels = com.snehashis.data.llm.LlmPluginAnalyzer.parseOpenAiModelsResponse(
+            groqJson,
+            "https://api.groq.com/openai/v1"
+        )
+        assertEquals(1, groqModels.size)
+        assertEquals("qwen/qwen2.5-coder-32b", groqModels.first().id)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.FREE in groqModels.first().tags)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.CODER in groqModels.first().tags)
+    }
+
+    @Test
+    fun parseOllamaTagsResponse_extractsFamilyAndCapabilityTags() {
+        val ollamaTagsJson = """
+            {
+              "models": [
+                {"name": "qwen2.5-coder:7b", "details": {"family": "qwen2"}},
+                {"name": "deepseek-r1:8b", "details": {"family": "llama"}}
+              ]
+            }
+        """.trimIndent()
+        val models = com.snehashis.data.llm.LlmPluginAnalyzer.parseOllamaTagsResponse(ollamaTagsJson)
+        assertEquals(2, models.size)
+        val coder = models.first { it.id == "qwen2.5-coder:7b" }
+        assertEquals("qwen2", coder.ownedBy)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.CODER in coder.tags)
+        val r1 = models.first { it.id == "deepseek-r1:8b" }
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.REASONING in r1.tags)
+        assertTrue(com.snehashis.domain.model.ModelCapabilityTag.FAST in r1.tags)
+    }
 }
