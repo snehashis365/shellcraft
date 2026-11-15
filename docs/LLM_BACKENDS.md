@@ -11,6 +11,7 @@ ShellCraft decouples CLI-to-GUI synthesis from any single AI vendor. You can swi
 | **`FIREBASE_GEMINI`** | Firebase AI Logic SDK (`Firebase.ai`) | Enforced `Schema.obj` JSON Schema (`responseMimeType = "application/json"`) | `2s – 12s` |
 | **`OLLAMA_LOCAL`** | `POST <url>/api/chat` (`stream: true`, NDJSON) | `format: "json"` + system schema prompt + `thinking` stream tracking | `10s – 180s` |
 | **`OPENAI_COMPATIBLE`** | `POST <url>/chat/completions` (`stream: true`, SSE) | System schema prompt + SSE delta/reasoning tracking (`delta.reasoning_content`) | `10s – 300s+` |
+| **`ON_DEVICE_NANO_EXPERIMENTAL`** | ML Kit GenAI Prompt API (`Gemini Nano` via Android AICore) | Compact 1-shot system prompt + CLI doc condensation + JSON repair | `3s – 25s` (offline) |
 
 ---
 
@@ -42,6 +43,17 @@ ShellCraft decouples CLI-to-GUI synthesis from any single AI vendor. You can swi
    - **Model Name**: Exact model ID served by `/models` (e.g. `qwen/qwen3.6-35b-a3b`, `google/gemma-4-12b-qat`).
    - **Bearer API Key**: Optional; encrypted locally with `AndroidKeyStore`.
 3. Tap **Test Connection** (`GET /v1/models`) to confirm reachability.
+
+---
+
+## 4. On-Device Gemini Nano (Experimental · Android AICore)
+
+ShellCraft includes an experimental **100% offline** plugin synthesizer powered by Android's official **ML Kit GenAI Prompt API** (`com.google.mlkit:genai-prompt`) and **Gemini Nano** managed by **Android AICore**:
+
+- **Zero Bundled Weights**: Model weights are downloaded and updated securely by Google Play Services / Android AICore (Private Compute Services) rather than shipping large files inside the APK (`minSdk 26+` required).
+- **Automatic Hardware Delegation**: AICore schedules inference across the device NPU, GPU, and CPU automatically.
+- **4,000-Token Window Safeguards**: `CliDocCondenser` strips verbose man-page prose down to synopsis, subcommands, and flags before prompting, and `OnDeviceNanoEngine` verifies the token budget via `countTokens()` plus repairs truncated JSON if output nears the token ceiling.
+- **Foreground Constraint & Auto-Fallback**: Android AICore restricts on-device inference to active foreground sessions. In **Settings → On-Device Nano (Exp.)**, you can inspect live AICore readiness, trigger system model download, toggle doc condensation, or enable **Auto-Fallback** to Cloud Gemini / Ollama / OpenAI-Compatible if a device does not support AICore or hits battery quota limits.
 
 ---
 

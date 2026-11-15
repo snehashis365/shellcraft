@@ -10,12 +10,12 @@ plugins {
 }
 
 android {
-  namespace = "com.example"
+  namespace = "com.snehashis"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
     applicationId = "com.aistudio.shellcraft.xkvzpm"
-    minSdk = 24
+    minSdk = 26
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
@@ -128,6 +128,7 @@ dependencies {
   implementation(libs.okhttp)
   implementation(libs.mwiede.jsch)
   implementation(libs.androidx.biometric)
+  implementation(libs.mlkit.genai.prompt)
   // implementation(libs.play.services.location)
   // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)

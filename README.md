@@ -133,7 +133,7 @@ Commands do not run blind inside a one-way pipe:
 │   └── LLM_BACKENDS.md             # Gemini, Ollama, LM Studio & timeout/streaming guide
 ├── plugins/
 │   └── README.md                   # Same-repo plugin directory guide
-└── app/src/main/java/com/example/
+└── app/src/main/java/com/snehashis/
     ├── MainActivity.kt             # Edge-to-edge host + App Check bootstrap
     ├── core/
     │   ├── AppContainer.kt         # Process-wide pipeline scope, WakeLock/WifiLock
