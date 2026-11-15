@@ -1,0 +1,6 @@
+{
+  "name": "ShellCraft",
+  "description": "AI-powered SSH command-line to GUI plugin generator with safety checks, biometric sudo authorization, and GitHub sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
