@@ -32,16 +32,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import com.snehashis.ui.theme.LocalDisableHeavyAnimations
 
 fun Modifier.springPressScale(
     enabled: Boolean = true,
     onHapticTick: (() -> Unit)? = null,
     onClick: () -> Unit
 ): Modifier = composed {
+    val disableHeavy = LocalDisableHeavyAnimations.current
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (pressed && enabled) 0.965f else 1f,
+        targetValue = if (pressed && enabled && !disableHeavy) 0.965f else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMedium
@@ -72,21 +74,28 @@ fun GlowSurfaceCard(
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
+    val disableHeavy = LocalDisableHeavyAnimations.current
     val animatedAccent by animateColorAsState(
         targetValue = accentColor,
-        animationSpec = tween(450),
+        animationSpec = tween(if (disableHeavy) 120 else 450),
         label = "glowAccent"
     )
-    val infinite = rememberInfiniteTransition(label = "meshGlow")
-    val drift by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "glowDrift"
-    )
+
+    val drift = if (isPulsing && !disableHeavy) {
+        val infinite = rememberInfiniteTransition(label = "meshGlow")
+        val value by infinite.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(2600, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "glowDrift"
+        )
+        value
+    } else {
+        0f
+    }
 
     val baseSurface = MaterialTheme.colorScheme.surfaceContainer
 
@@ -96,7 +105,7 @@ fun GlowSurfaceCard(
             .clip(shape),
         shape = shape,
         color = Color.Transparent,
-        border = BorderStroke(1.dp, animatedAccent.copy(alpha = if (isPulsing) 0.55f else 0.3f))
+        border = BorderStroke(1.dp, animatedAccent.copy(alpha = if (isPulsing) 0.62f else 0.36f))
     ) {
         Box(
             modifier = Modifier
@@ -104,14 +113,15 @@ fun GlowSurfaceCard(
                 .drawBehind {
                     drawRect(color = baseSurface)
                     if (size.width > 1f && size.height > 1f) {
-                        val radius = (size.maxDimension * (0.65f + (if (isPulsing) drift * 0.18f else 0f)))
+                        val activePulse = isPulsing && !disableHeavy
+                        val radius = (size.maxDimension * (0.72f + (if (activePulse) drift * 0.2f else 0f)))
                             .coerceAtLeast(1f)
-                        val centerX = size.width * (0.85f - (if (isPulsing) drift * 0.12f else 0f))
-                        val centerY = size.height * 0.18f
+                        val centerX = size.width * (0.86f - (if (activePulse) drift * 0.14f else 0f))
+                        val centerY = size.height * 0.16f
                         drawRect(
                             brush = Brush.radialGradient(
                                 colors = listOf(
-                                    animatedAccent.copy(alpha = if (isPulsing) 0.22f else 0.12f),
+                                    animatedAccent.copy(alpha = if (isPulsing) 0.24f else 0.13f),
                                     Color.Transparent
                                 ),
                                 center = Offset(centerX, centerY),

@@ -8,6 +8,7 @@ import com.snehashis.data.local.SeedPlugins
 import com.snehashis.data.local.ShellCraftDatabase
 import com.snehashis.data.local.SettingsDataStore
 import com.snehashis.domain.model.CliPlugin
+import com.snehashis.domain.model.PluginSource
 import com.snehashis.domain.model.SshHostProfile
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -40,9 +41,34 @@ class ShellCraftRepository(context: Context) {
     val recentLogsFlow: Flow<List<ExecutionLogEntity>> = logDao.observeRecentLogs()
 
     suspend fun ensureSeedPlugins() {
+        val starters = SeedPlugins.starterPlugins()
         if (pluginDao.countPlugins() == 0) {
-            pluginDao.upsertPlugins(SeedPlugins.initialEntities())
+            pluginDao.upsertPlugins(starters.map { SeedPlugins.toEntity(it) })
+            return
         }
+        // Upgrade uncustomized v1.0.0 built-ins cleanly to v2.0.0 dashboards without touching user-edited variants
+        val toUpgrade = starters.mapNotNull { starter ->
+            val existing = pluginDao.findById(starter.id) ?: return@mapNotNull null
+            val decoded = runCatching { json.decodeFromString<CliPlugin>(existing.pluginJson) }.getOrNull()
+            if (decoded != null &&
+                decoded.source == PluginSource.BUILT_IN &&
+                decoded.customFromBuiltinId == null &&
+                decoded.version != starter.version
+            ) {
+                SeedPlugins.toEntity(starter)
+            } else {
+                null
+            }
+        }
+        if (toUpgrade.isNotEmpty()) {
+            pluginDao.upsertPlugins(toUpgrade)
+        }
+    }
+
+    suspend fun resetBuiltinPlugin(pluginId: String): CliPlugin? {
+        val starter = SeedPlugins.starterPlugins().find { it.id == pluginId } ?: return null
+        pluginDao.upsertPlugin(SeedPlugins.toEntity(starter))
+        return starter
     }
 
     suspend fun saveHost(profile: SshHostProfile) {

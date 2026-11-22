@@ -1,14 +1,25 @@
+@file:Suppress("DEPRECATION")
+
 package com.snehashis
 
 import com.snehashis.core.security.SafetyGuard
+import com.snehashis.data.local.LlmSettingsMigration
+import com.snehashis.data.local.SeedPlugins
+import com.snehashis.data.llm.LlmPluginPromptBuilder
+import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.CliPlugin
+import com.snehashis.domain.model.LlmProviderType
+import com.snehashis.domain.model.OutputRowAction
 import com.snehashis.domain.model.ParameterType
+import com.snehashis.domain.model.ParameterWidget
 import com.snehashis.domain.model.PluginAction
 import com.snehashis.domain.model.PluginCommandBuilder
+import com.snehashis.domain.model.PluginGuiStyle
 import com.snehashis.domain.model.PluginParameter
 import com.snehashis.domain.model.RiskLevel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,6 +81,141 @@ class ShellCraftCoreTest {
         )
 
         assertEquals("sudo docker logs --tail 50 -t 'my web app'", cmd)
+    }
+
+    @Test
+    fun resolveRowActionCommand_interpolatesRowTokensAndEscalatesSudo() {
+        val dockerSeed = SeedPlugins.starterPlugins().first { it.commandName == "docker" }
+        val listAction = dockerSeed.actions.first { it.id == "ps" }
+        val restartRowAction = listAction.rowActions.first { it.id == "container_restart" }
+
+        val resolved = PluginCommandBuilder.resolveRowActionCommand(
+            plugin = dockerSeed,
+            rowAction = restartRowAction,
+            contextTokens = mapOf("col:0" to "web app 1"),
+            elevateWithSudo = false
+        )
+        assertNotNull(resolved)
+        val (targetAction, command) = resolved!!
+        assertEquals("restart_container", targetAction.id)
+        assertEquals("docker restart 'web app 1'", command)
+
+        val stopRowAction = OutputRowAction(
+            id = "row_stop_sudo",
+            label = "Force Stop",
+            targetActionId = "stop_container",
+            paramMappings = mapOf("container" to "{unit}"),
+            riskLevel = RiskLevel.HIGH,
+            requiresSudo = true
+        )
+        val elevated = PluginCommandBuilder.resolveRowActionCommand(
+            plugin = dockerSeed,
+            rowAction = stopRowAction,
+            contextTokens = mapOf("unit" to "redis-cache")
+        )
+        assertEquals("sudo docker stop redis-cache", elevated?.second)
+    }
+
+    @Test
+    fun seedPlugins_v2ContainsPresetsSlidersFilePickersAndRowActions() {
+        val defaults = SeedPlugins.starterPlugins()
+        val systemctl = defaults.first { it.commandName == "systemctl" }
+        val journalctl = defaults.first { it.commandName == "journalctl" }
+        val rsync = defaults.first { it.commandName == "rsync" }
+
+        assertTrue(systemctl.presets.isNotEmpty())
+        assertTrue(systemctl.actions.first { it.id == "list_failed" }.rowActions.isNotEmpty())
+
+        val linesParam = journalctl.actions.first { it.id == "query" }.parameters.first { it.id == "lines" }
+        assertEquals(ParameterWidget.SLIDER, linesParam.widget)
+
+        val srcParam = rsync.actions.first { it.id == "sync" }.parameters.first { it.id == "source" }
+        assertEquals(ParameterWidget.FILE_PATH, srcParam.widget)
+        assertEquals(ParameterType.PATH, srcParam.type)
+    }
+
+    @Test
+    fun llmSettingsMigration_consolidatesLegacyOllamaIntoByokPreset() {
+        val migrated = LlmSettingsMigration.migrateLegacyProvider(
+            rawProvider = LlmProviderType.OLLAMA_LOCAL.name,
+            rawPreset = null,
+            rawUrl = "http://192.168.1.50:11434"
+        )
+        assertEquals(LlmProviderType.OPENAI_COMPATIBLE, migrated.first)
+        assertEquals(ByokProviderPreset.LOCAL_OLLAMA, migrated.second)
+        assertEquals("http://192.168.1.50:11434/v1", migrated.third)
+
+        assertEquals(
+            "http://localhost:11434/v1",
+            LlmSettingsMigration.normalizeOllamaV1Url("http://localhost:11434/v1")
+        )
+    }
+
+    @Test
+    fun parseGeneratedPluginJson_parsesV2WidgetsPresetsRowActionsAndHtmlMode() {
+        val sampleJson = """
+            {
+              "assistantSummary": "Built Docker GUI deck",
+              "commandName": "docker",
+              "displayName": "Docker Studio",
+              "description": "Manage containers",
+              "category": "Containers",
+              "targetOs": "LINUX",
+              "uiMode": "MODULAR_DASHBOARD",
+              "presets": [
+                {
+                  "id": "all_containers",
+                  "label": "All Containers",
+                  "actionId": "ps",
+                  "valuePairs": [{"key": "all", "value": "true"}]
+                }
+              ],
+              "actions": [
+                {
+                  "id": "ps",
+                  "label": "Containers",
+                  "subcommand": "docker ps",
+                  "riskLevel": "SAFE",
+                  "parameters": [
+                    {"id": "all", "label": "Show Stopped", "type": "BOOLEAN_FLAG", "flag": "-a", "widget": "TOGGLE_CARD"},
+                    {"id": "limit", "label": "Limit", "type": "NUMBER", "flag": "-n", "widget": "SLIDER", "minValue": 5, "maxValue": 100, "stepValue": 5, "unitLabel": "rows"}
+                  ],
+                  "rowActions": [
+                    {"id": "logs", "label": "Logs", "targetActionId": "ps", "mappingPairs": [{"key": "limit", "value": "{col:0}"}]}
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val (plugin, summary) = LlmPluginPromptBuilder.parseGeneratedPluginJson(
+            commandName = "docker",
+            rawJson = sampleJson,
+            fallbackGuiStyle = PluginGuiStyle.MODULAR_DASHBOARD
+        )
+        assertEquals("Built Docker GUI deck", summary)
+        assertEquals(PluginGuiStyle.MODULAR_DASHBOARD, plugin.uiMode)
+        assertEquals("ps", plugin.actions.first().subcommand)
+        assertEquals(1, plugin.presets.size)
+        assertEquals("true", plugin.presets.first().values["all"])
+        assertEquals(ParameterWidget.SLIDER, plugin.actions.first().parameters[1].widget)
+        assertEquals(1, plugin.actions.first().rowActions.size)
+
+        val htmlSample = """
+            {
+              "commandName": "htop",
+              "displayName": "Htop Live",
+              "uiMode": "HTML_CANVAS_CUSTOM",
+              "actions": [{"id": "snap", "label": "Snapshot", "subcommand": "", "riskLevel": "SAFE"}]
+            }
+        """.trimIndent()
+        val (htmlPlugin, _) = LlmPluginPromptBuilder.parseGeneratedPluginJson(
+            commandName = "htop",
+            rawJson = htmlSample,
+            fallbackGuiStyle = PluginGuiStyle.HTML_CANVAS_CUSTOM
+        )
+        assertEquals(PluginGuiStyle.HTML_CANVAS_CUSTOM, htmlPlugin.uiMode)
+        assertFalse(htmlPlugin.customHtmlTemplate.isNullOrBlank())
     }
 
     @Test

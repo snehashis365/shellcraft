@@ -26,6 +26,9 @@ interface PluginDao {
     @Query("SELECT * FROM cli_plugins ORDER BY updatedAtEpochMs DESC, displayName ASC")
     fun observePlugins(): Flow<List<PluginEntity>>
 
+    @Query("SELECT * FROM cli_plugins WHERE id = :id LIMIT 1")
+    suspend fun findById(id: String): PluginEntity?
+
     @Query("SELECT * FROM cli_plugins WHERE LOWER(commandName) = LOWER(:commandName) LIMIT 1")
     suspend fun findByCommandName(commandName: String): PluginEntity?
 

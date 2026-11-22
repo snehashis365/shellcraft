@@ -8,10 +8,12 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,17 +21,23 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.NetworkPing
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,12 +47,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.snehashis.domain.model.FormattedOutput
 import com.snehashis.domain.model.LogSeverity
 import com.snehashis.domain.model.OutputFormatter
+import com.snehashis.domain.model.OutputRowAction
+import com.snehashis.domain.model.RiskLevel
 import com.snehashis.ui.theme.JetBrainsMonoFontFamily
 
 @Composable
@@ -54,6 +66,8 @@ fun RichCommandOutputView(
     exitCode: Int?,
     durationMs: Long?,
     onCopyRaw: () -> Unit,
+    rowActions: List<OutputRowAction> = emptyList(),
+    onInvokeRowAction: ((OutputRowAction, Map<String, String>) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showRawTerminal by remember(rawOutput) { mutableStateOf(false) }
@@ -155,8 +169,16 @@ fun RichCommandOutputView(
             } else {
                 when (parsed) {
                     is FormattedOutput.PingReport -> PingReportCard(parsed)
-                    is FormattedOutput.SystemdStatusReport -> SystemdStatusCard(parsed)
-                    is FormattedOutput.TableReport -> TableReportCards(parsed)
+                    is FormattedOutput.SystemdStatusReport -> SystemdStatusCard(
+                        report = parsed,
+                        rowActions = rowActions,
+                        onInvokeRowAction = onInvokeRowAction
+                    )
+                    is FormattedOutput.TableReport -> TableReportCards(
+                        report = parsed,
+                        rowActions = rowActions,
+                        onInvokeRowAction = onInvokeRowAction
+                    )
                     is FormattedOutput.StructuredJsonReport -> JsonReportCard(parsed)
                     is FormattedOutput.KeyValueReport -> KeyValueReportCard(parsed)
                     is FormattedOutput.LogLinesReport -> LogLinesCard(parsed)
@@ -168,22 +190,58 @@ fun RichCommandOutputView(
 
 @Composable
 private fun PingReportCard(report: FormattedOutput.PingReport) {
+    val avgFloat = Regex("""([\d.]+)""").find(report.avgMs)?.groupValues?.getOrNull(1)?.toFloatOrNull()
+    val lossFloat = Regex("""([\d.]+)""").find(report.lossPercent)?.groupValues?.getOrNull(1)?.toFloatOrNull() ?: 0f
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainer,
             shape = MaterialTheme.shapes.medium,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Filled.NetworkPing, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text("ICMP Reachability · ${report.host}", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Filled.NetworkPing, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("ICMP Reachability · ${report.host}", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Surface(
+                        color = if (lossFloat == 0f) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
+                        contentColor = if (lossFloat == 0f) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error,
+                        shape = MaterialTheme.shapes.extraSmall
+                    ) {
+                        Text(
+                            text = if (lossFloat == 0f) "HEALTHY" else "${report.lossPercent} LOSS",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        )
+                    }
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MetricTile("Packets", "${report.received}/${report.transmitted}", Modifier.weight(1f))
                     MetricTile("Loss", report.lossPercent, Modifier.weight(1f))
                     MetricTile("Avg RTT", report.avgMs, Modifier.weight(1f))
+                }
+                if (avgFloat != null) {
+                    val qualityFraction = (1f - (avgFloat / 250f)).coerceIn(0.12f, 1f)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Latency Quality Index",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        LinearProgressIndicator(
+                            progress = { qualityFraction },
+                            color = if (avgFloat < 80f) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.fillMaxWidth().height(7.dp)
+                        )
+                    }
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MetricTile("Min RTT", report.minMs, Modifier.weight(1f))
@@ -195,8 +253,13 @@ private fun PingReportCard(report: FormattedOutput.PingReport) {
 }
 
 @Composable
-private fun SystemdStatusCard(report: FormattedOutput.SystemdStatusReport) {
+private fun SystemdStatusCard(
+    report: FormattedOutput.SystemdStatusReport,
+    rowActions: List<OutputRowAction>,
+    onInvokeRowAction: ((OutputRowAction, Map<String, String>) -> Unit)?
+) {
     val accent = if (report.isHealthy) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error
+    val cleanUnit = report.unit.trim().substringBefore(" ")
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
         shape = MaterialTheme.shapes.medium,
@@ -232,6 +295,31 @@ private fun SystemdStatusCard(report: FormattedOutput.SystemdStatusReport) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            if (rowActions.isNotEmpty() && onInvokeRowAction != null && cleanUnit.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    rowActions.forEach { ra ->
+                        RowActionButton(
+                            rowAction = ra,
+                            testTag = "systemd_row_action_${ra.id}",
+                            onClick = {
+                                val tokens = mapOf(
+                                    "unit" to cleanUnit,
+                                    "col:0" to cleanUnit,
+                                    "pid" to report.mainPid.substringBefore(" ")
+                                )
+                                onInvokeRowAction(ra, tokens)
+                            }
+                        )
+                    }
+                }
+            }
+
             if (report.recentLogs.isNotEmpty()) {
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainerLowest,
@@ -253,14 +341,18 @@ private fun SystemdStatusCard(report: FormattedOutput.SystemdStatusReport) {
 }
 
 @Composable
-private fun TableReportCards(report: FormattedOutput.TableReport) {
+private fun TableReportCards(
+    report: FormattedOutput.TableReport,
+    rowActions: List<OutputRowAction>,
+    onInvokeRowAction: ((OutputRowAction, Map<String, String>) -> Unit)?
+) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = "${report.rows.size} item(s) · ${report.headers.joinToString(" / ")}",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        report.rows.take(25).forEach { row ->
+        report.rows.take(25).forEachIndexed { rowIndex, row ->
             val primaryTitle = row.firstOrNull().orEmpty()
             val statusCell = row.find { cell ->
                 cell.contains("up", true) || cell.contains("running", true) ||
@@ -271,13 +363,25 @@ private fun TableReportCards(report: FormattedOutput.TableReport) {
                 Regex("""(\d{1,3})%""").find(cell)?.groupValues?.getOrNull(1)?.toIntOrNull()
             }
 
+            val rowTokens = remember(report.headers, row) {
+                buildMap {
+                    row.forEachIndexed { idx, value ->
+                        put("col:$idx", value.trim())
+                        report.headers.getOrNull(idx)?.let { hdr ->
+                            put("col:${hdr.trim()}", value.trim())
+                        }
+                    }
+                    put("unit", primaryTitle.trim())
+                }
+            }
+
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainer,
                 shape = MaterialTheme.shapes.medium,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -341,9 +445,57 @@ private fun TableReportCards(report: FormattedOutput.TableReport) {
                             }
                         }
                     }
+
+                    if (rowActions.isNotEmpty() && onInvokeRowAction != null && primaryTitle.isNotBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            rowActions.forEach { ra ->
+                                RowActionButton(
+                                    rowAction = ra,
+                                    testTag = "row_action_${ra.id}_$rowIndex",
+                                    onClick = { onInvokeRowAction(ra, rowTokens) }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RowActionButton(
+    rowAction: OutputRowAction,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    val icon: ImageVector = when (rowAction.iconName.lowercase()) {
+        "refresh", "restart" -> Icons.Filled.Refresh
+        "stop", "kill" -> Icons.Filled.Stop
+        "description", "logs" -> Icons.Filled.Description
+        "info", "inspect" -> Icons.Filled.Info
+        else -> Icons.Filled.PlayArrow
+    }
+    val tint = when {
+        rowAction.riskLevel >= RiskLevel.HIGH -> MaterialTheme.colorScheme.error
+        rowAction.riskLevel == RiskLevel.MODERATE || rowAction.requiresSudo -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    OutlinedButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        border = BorderStroke(1.dp, tint.copy(alpha = 0.65f)),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = tint),
+        modifier = Modifier.heightIn(min = 48.dp).testTag(testTag)
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(15.dp))
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(text = rowAction.label, style = MaterialTheme.typography.labelLarge)
     }
 }
 

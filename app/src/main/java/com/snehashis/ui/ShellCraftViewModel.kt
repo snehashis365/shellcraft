@@ -1,6 +1,8 @@
 package com.snehashis.ui
 
 import android.app.Application
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -10,6 +12,7 @@ import com.snehashis.core.security.SafetyGuard
 import com.snehashis.core.security.SecretCipher
 import com.snehashis.data.local.ExecutionLogEntity
 import com.snehashis.data.local.SecuritySettings
+import com.snehashis.data.ssh.RemoteFileEntry
 import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.CliPlugin
 import com.snehashis.domain.model.EndpointTestResult
@@ -24,6 +27,8 @@ import com.snehashis.domain.model.ModelDiscoveryState
 import com.snehashis.domain.model.OnDeviceModelStatus
 import com.snehashis.domain.model.PluginAction
 import com.snehashis.domain.model.PluginAnalysisSource
+import com.snehashis.domain.model.PluginChatTurn
+import com.snehashis.domain.model.PluginGuiStyle
 import com.snehashis.domain.model.PluginSource
 import com.snehashis.domain.model.RiskLevel
 import com.snehashis.domain.model.SshAuthType
@@ -116,6 +121,9 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _modelDiscoveryState = MutableStateFlow<ModelDiscoveryState>(ModelDiscoveryState.Idle)
     val modelDiscoveryState: StateFlow<ModelDiscoveryState> = _modelDiscoveryState.asStateFlow()
+
+    private val _sftpUploadStatus = MutableStateFlow<Pair<String, Float>?>(null)
+    val sftpUploadStatus: StateFlow<Pair<String, Float>?> = _sftpUploadStatus.asStateFlow()
 
     private var activeExecutionJob: Job? = null
     private var promptWatchJob: Job? = null
@@ -545,7 +553,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
-    // --- Sleep-Resilient AI Forge Service ---
+    // --- Sleep-Resilient AI Forge Service & Refinement Chat ---
 
     fun resetForge() {
         AppContainer.updateForgeState(ForgeState.Idle)
@@ -555,7 +563,9 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
         commandName: String,
         sourceMode: PluginAnalysisSource,
         manualDocsText: String,
-        bypassExistingCheck: Boolean = false
+        bypassExistingCheck: Boolean = false,
+        guiStyle: PluginGuiStyle? = null,
+        customInstructions: String = ""
     ) {
         val cleanCmd = commandName.trim()
         if (cleanCmd.isBlank()) {
@@ -563,6 +573,7 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
             return
         }
         val osHint = (_connectionState.value as? SshConnectionState.Connected)?.env?.osName ?: "POSIX"
+        val resolvedStyle = guiStyle ?: securitySettings.value.defaultForgeGuiStyle
         haptics.tick()
         AppContainer.startForgePipeline(
             context = getApplication(),
@@ -570,12 +581,93 @@ class ShellCraftViewModel(application: Application) : AndroidViewModel(applicati
             sourceMode = sourceMode,
             manualDocs = manualDocsText,
             osHint = osHint,
-            bypassCheck = bypassExistingCheck
+            bypassCheck = bypassExistingCheck,
+            guiStyle = resolvedStyle,
+            customInstructions = customInstructions
         )
     }
 
     fun cancelForgeAnalysis() {
         AppContainer.cancelForgePipeline()
+    }
+
+    fun updateReadyForgePlugin(plugin: CliPlugin) {
+        val current = forgeState.value as? ForgeState.Ready ?: return
+        AppContainer.updateForgeState(current.copy(plugin = plugin))
+    }
+
+    suspend fun refinePluginWithChat(
+        currentPlugin: CliPlugin,
+        history: List<PluginChatTurn>,
+        instruction: String,
+        rawDocs: String = ""
+    ): Result<Pair<CliPlugin, String>> {
+        return runCatching {
+            val activeLlm = repository.settingsDataStore.llmConfigFlow.first()
+            llmAnalyzer.refinePluginWithChat(
+                currentPlugin = currentPlugin,
+                conversationHistory = history,
+                userInstruction = instruction,
+                rawDocs = rawDocs,
+                config = activeLlm
+            )
+        }.onSuccess {
+            haptics.success()
+        }.onFailure {
+            haptics.warning()
+        }
+    }
+
+    fun resetBuiltinPlugin(pluginId: String) {
+        viewModelScope.launch {
+            val restored = repository.resetBuiltinPlugin(pluginId)
+            if (restored != null) {
+                haptics.success()
+                _bannerMessage.value = "Restored ${restored.displayName} to factory built-in default"
+            }
+        }
+    }
+
+    suspend fun listRemoteDirectory(path: String): Result<Pair<String, List<RemoteFileEntry>>> {
+        return runCatching { sshEngine.listRemoteDirectory(path) }
+    }
+
+    suspend fun uploadPhoneFileToRemote(uri: Uri): Result<String> {
+        val app = getApplication<Application>()
+        return runCatching {
+            var displayName = "uploaded_file"
+            var totalBytes = -1L
+            app.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx >= 0) {
+                        displayName = cursor.getString(nameIdx) ?: displayName
+                    }
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                        totalBytes = cursor.getLong(sizeIdx)
+                    }
+                }
+            }
+            _sftpUploadStatus.value = displayName to 0f
+            val remotePath = app.contentResolver.openInputStream(uri)?.use { stream ->
+                sshEngine.uploadLocalStream(
+                    inputStream = stream,
+                    fileName = displayName,
+                    totalBytes = totalBytes
+                ) { transferred ->
+                    val pct = if (totalBytes > 0L) {
+                        (transferred.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                    } else 0.5f
+                    _sftpUploadStatus.value = displayName to pct
+                }
+            } ?: throw IllegalStateException("Unable to open selected phone file.")
+            haptics.success()
+            _bannerMessage.value = "Uploaded to $remotePath"
+            remotePath
+        }.also {
+            _sftpUploadStatus.value = null
+        }
     }
 
     fun savePlugin(plugin: CliPlugin, pushToGitHubIfEnabled: Boolean = true) {

@@ -22,6 +22,17 @@ enum class ParameterType {
 }
 
 @Serializable
+enum class ParameterWidget {
+    AUTO,
+    SLIDER,
+    SEGMENTED_CHOICE,
+    TOGGLE_CARD,
+    FILE_PATH,
+    CHIP_MULTI_SELECT,
+    STEPPER
+}
+
+@Serializable
 enum class PluginSource {
     BUILT_IN,
     AI_GENERATED,
@@ -49,7 +60,24 @@ data class PluginParameter(
     val defaultValue: String = "",
     val placeholder: String = "",
     val options: List<String> = emptyList(),
-    val validationRegex: String? = null
+    val validationRegex: String? = null,
+    val widget: ParameterWidget = ParameterWidget.AUTO,
+    val group: String = "Primary",
+    val minValue: Float? = null,
+    val maxValue: Float? = null,
+    val stepValue: Float? = null,
+    val unitLabel: String = ""
+)
+
+@Serializable
+data class OutputRowAction(
+    val id: String,
+    val label: String,
+    val targetActionId: String,
+    val paramMappings: Map<String, String> = emptyMap(),
+    val iconName: String = "play",
+    val riskLevel: RiskLevel = RiskLevel.SAFE,
+    val requiresSudo: Boolean = false
 )
 
 @Serializable
@@ -61,7 +89,18 @@ data class PluginAction(
     val riskLevel: RiskLevel = RiskLevel.SAFE,
     val requiresSudo: Boolean = false,
     val outputHint: String = "text",
-    val parameters: List<PluginParameter> = emptyList()
+    val parameters: List<PluginParameter> = emptyList(),
+    val rowActions: List<OutputRowAction> = emptyList()
+)
+
+@Serializable
+data class PluginPreset(
+    val id: String,
+    val label: String,
+    val description: String = "",
+    val actionId: String,
+    val values: Map<String, String> = emptyMap(),
+    val iconName: String = "bolt"
 )
 
 @Serializable
@@ -77,7 +116,12 @@ data class CliPlugin(
     val author: String = "ShellCraft",
     val source: PluginSource = PluginSource.BUILT_IN,
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
-    val actions: List<PluginAction> = emptyList()
+    val actions: List<PluginAction> = emptyList(),
+    val uiMode: PluginGuiStyle = PluginGuiStyle.MODULAR_DASHBOARD,
+    val accentHex: String? = null,
+    val presets: List<PluginPreset> = emptyList(),
+    val customHtmlTemplate: String? = null,
+    val customFromBuiltinId: String? = null
 )
 
 object PluginCommandBuilder {
@@ -143,57 +187,43 @@ object PluginCommandBuilder {
 
         return parts.joinToString(" ")
     }
+
+    fun resolveRowActionCommand(
+        plugin: CliPlugin,
+        rowAction: OutputRowAction,
+        contextTokens: Map<String, String>,
+        elevateWithSudo: Boolean = rowAction.requiresSudo
+    ): Pair<PluginAction, String>? {
+        val targetAction = plugin.actions.find { it.id == rowAction.targetActionId } ?: return null
+        val resolvedValues = mutableMapOf<String, String>()
+        targetAction.parameters.forEach { p ->
+            resolvedValues[p.id] = p.defaultValue
+        }
+        rowAction.paramMappings.forEach { (paramId, template) ->
+            var replaced = template
+            contextTokens.forEach { (key, value) ->
+                replaced = replaced.replace("{$key}", value)
+            }
+            resolvedValues[paramId] = replaced.trim()
+        }
+        val cmd = buildCommand(
+            plugin = plugin,
+            action = targetAction,
+            values = resolvedValues,
+            elevateWithSudo = elevateWithSudo || targetAction.requiresSudo || rowAction.requiresSudo
+        )
+        return targetAction to cmd
+    }
 }
 
 object PluginSchemaSpec {
-    const val SPEC_MARKDOWN = """# ShellCraft Extensible Plugin Architecture (shellcraft.plugin.v1)
+    const val SPEC_MARKDOWN = """# ShellCraft Extensible Plugin Architecture (shellcraft.plugin.v2)
 
-ShellCraft converts any POSIX / Linux / macOS / Windows-OpenSSH CLI application into a uniform Material 3 graphical control panel using declarative JSON plugin manifests.
+ShellCraft converts any POSIX / Linux / macOS / Windows-OpenSSH CLI application into either a rich **Modular Tool Dashboard** (presets, sliders, segmented controls, interactive row actions) or a sandboxed **Custom HTML/Canvas GUI** using declarative JSON plugin manifests.
 
 ## Design Philosophy
-1. **Predictable Parameter Mapping**: Every CLI flag or positional operand maps to a typed control (`BOOLEAN_FLAG`, `SELECT_ENUM`, `NUMBER`, `PORT`, `PATH`, `KEY_VALUE`, `TEXT`).
-2. **Deterministic POSIX Quoting**: Commands are assembled deterministically using single-quote POSIX escaping to prevent shell injection.
-3. **Explicit Risk Metadata**: Actions declare `riskLevel` (`SAFE`, `MODERATE`, `HIGH`, `CRITICAL`) and `requiresSudo` so SafetyGuard and Biometric Sudo always gate dangerous operations.
-4. **GitHub Check-Before-Generate**: Plugins live as `<commandName>.json` inside your configured GitHub repository (`plugins/` by default). New devices fetch existing manifests before invoking any LLM.
-
-## JSON Schema Example
-```json
-{
-  "schemaVersion": "shellcraft.plugin.v1",
-  "id": "builtin-docker",
-  "commandName": "docker",
-  "displayName": "Docker Engine",
-  "description": "Inspect, manage, and prune containers",
-  "category": "Containers",
-  "targetOs": "POSIX",
-  "version": "1.0.0",
-  "author": "community",
-  "actions": [
-    {
-      "id": "ps",
-      "label": "List Containers",
-      "subcommand": "ps",
-      "riskLevel": "SAFE",
-      "requiresSudo": false,
-      "parameters": [
-        {
-          "id": "all",
-          "label": "Include Stopped",
-          "type": "BOOLEAN_FLAG",
-          "flag": "-a",
-          "defaultValue": "true"
-        }
-      ]
-    }
-  ]
-}
-```
-
-## Interactive Shells & Stdin Prompts
-ShellCraft executes commands over an allocated SSH pseudo-terminal (PTY) with live bidirectional stdin/stdout streaming:
-- Set `"outputHint": "interactive"` on actions that launch interactive prompts or confirmations (e.g., `ufw enable`, `brew upgrade --interactive`, `passwd`, REPLs).
-- If a running command pauses for input (`[y/N]`, `(yes/no)`, `Password:`, `Press Enter`, or a custom partial-line prompt), ShellCraft detects the prompt from the stream and surfaces one-tap confirmation buttons, masked secret fields, or a live stdin input bar to forward responses directly to the remote process.
-
-## Contributing via Agents or CI
-Third-party developers and automated doc agents can generate `shellcraft.plugin.v1` JSON files from `man` pages or `--help` output and commit them to `plugins/<commandName>.json` in your team's GitHub repository. ShellCraft automatically discovers and validates new manifests on sync."""
+1. **Rich Control Widgets**: Parameters declare `widget` (`AUTO`, `SLIDER`, `SEGMENTED_CHOICE`, `TOGGLE_CARD`, `FILE_PATH`, `STEPPER`), `group` (`Primary` / `Advanced`), `minValue`, `maxValue`, `stepValue`, and `unitLabel`.
+2. **One-Tap Presets & Interactive Outputs**: Plugins define `presets` for common workflows and `rowActions` on actions so table rows (e.g. containers, systemd units, processes) surface inline `Logs`, `Restart`, `Stop`, or `Inspect` buttons.
+3. **Deterministic POSIX Quoting**: Commands are assembled deterministically using single-quote POSIX escaping to prevent shell injection — even for Custom HTML/Canvas GUIs routed through `ShellCraftBridge`.
+4. **Explicit Risk Metadata**: Actions declare `riskLevel` (`SAFE`, `MODERATE`, `HIGH`, `CRITICAL`) and `requiresSudo` so SafetyGuard and Biometric Sudo always gate dangerous operations."""
 }

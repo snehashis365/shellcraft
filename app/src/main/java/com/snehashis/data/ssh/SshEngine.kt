@@ -9,8 +9,10 @@ import com.snehashis.domain.model.SshAuthType
 import com.snehashis.domain.model.SshExecutionResult
 import com.snehashis.domain.model.SshHostProfile
 import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.SftpProgressMonitor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -22,6 +24,15 @@ import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 
 private const val TAG = "SshEngine"
+
+data class RemoteFileEntry(
+    val name: String,
+    val path: String,
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val permissions: String,
+    val modifiedEpochSec: Long
+)
 
 class SshEngine {
     private val sessionMutex = Mutex()
@@ -191,6 +202,108 @@ class SshEngine {
         }
         activeStdinStream = null
         activeExecChannel = null
+    }
+
+    suspend fun listRemoteDirectory(requestedPath: String = ""): Pair<String, List<RemoteFileEntry>> =
+        withContext(Dispatchers.IO) {
+            val session = activeSession?.takeIf { it.isConnected }
+                ?: throw IllegalStateException("Connect an SSH host in Workspace first to browse remote files.")
+            var sftp: ChannelSftp? = null
+            try {
+                sftp = session.openChannel("sftp") as ChannelSftp
+                sftp.connect(12_000)
+                val homeDir = runCatching { sftp.home }.getOrDefault("/")
+                val trimmed = requestedPath.trim()
+                val targetPath = when {
+                    trimmed.isEmpty() || trimmed == "~" -> homeDir
+                    trimmed.startsWith("~/") -> "$homeDir/${trimmed.removePrefix("~/")}"
+                    else -> trimmed
+                }.replace(Regex("/+"), "/").ifEmpty { "/" }
+
+                sftp.cd(targetPath)
+                val resolvedPwd = sftp.pwd()
+                val rawEntries = sftp.ls(resolvedPwd)
+                val entries = rawEntries.mapNotNull { item ->
+                    val lsEntry = item as? ChannelSftp.LsEntry ?: return@mapNotNull null
+                    val name = lsEntry.filename ?: return@mapNotNull null
+                    if (name == "." || name == "..") return@mapNotNull null
+                    val attrs = lsEntry.attrs
+                    val childPath = if (resolvedPwd == "/") "/$name" else "$resolvedPwd/$name"
+                    RemoteFileEntry(
+                        name = name,
+                        path = childPath,
+                        isDirectory = attrs?.isDir == true,
+                        sizeBytes = attrs?.size ?: 0L,
+                        permissions = attrs?.permissionsString ?: "",
+                        modifiedEpochSec = (attrs?.mTime ?: 0).toLong()
+                    )
+                }.sortedWith(
+                    compareByDescending<RemoteFileEntry> { it.isDirectory }
+                        .thenBy { it.name.lowercase() }
+                )
+                resolvedPwd to entries
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "SFTP list failed for path=$requestedPath", e)
+                throw IllegalStateException("SFTP error: ${e.localizedMessage ?: "Failed to list directory"}")
+            } finally {
+                runCatching { sftp?.disconnect() }
+            }
+        }
+
+    suspend fun uploadLocalStream(
+        inputStream: InputStream,
+        fileName: String,
+        totalBytes: Long,
+        onProgress: (Long) -> Unit = {}
+    ): String = withContext(Dispatchers.IO) {
+        val session = activeSession?.takeIf { it.isConnected }
+            ?: throw IllegalStateException("Connect an SSH host in Workspace before uploading local files.")
+        var sftp: ChannelSftp? = null
+        try {
+            sftp = session.openChannel("sftp") as ChannelSftp
+            sftp.connect(15_000)
+            val safeName = fileName.trim().ifBlank { "upload_${System.currentTimeMillis()}" }
+                .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val homeDir = runCatching { sftp.home }.getOrDefault("/tmp")
+            val uploadDir = "$homeDir/.shellcraft_uploads".replace(Regex("/+"), "/")
+            val targetDir = try {
+                runCatching { sftp.stat(uploadDir) }.getOrElse {
+                    sftp.mkdir(uploadDir)
+                }
+                uploadDir
+            } catch (_: Exception) {
+                "/tmp"
+            }
+            val remotePath = "$targetDir/$safeName"
+            val monitor = object : SftpProgressMonitor {
+                private var transferred = 0L
+                override fun init(op: Int, src: String?, dest: String?, max: Long) {
+                    transferred = 0L
+                    onProgress(0L)
+                }
+
+                override fun count(count: Long): Boolean {
+                    transferred += count
+                    onProgress(transferred)
+                    return true
+                }
+
+                override fun end() {
+                    if (totalBytes > 0L) onProgress(totalBytes)
+                }
+            }
+            sftp.put(inputStream, remotePath, monitor, ChannelSftp.OVERWRITE)
+            remotePath
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "SFTP upload failed for $fileName", e)
+            throw IllegalStateException("SFTP upload failed: ${e.localizedMessage ?: "Permission or connection error"}")
+        } finally {
+            runCatching { sftp?.disconnect() }
+        }
     }
 
     private fun rewriteWithStdinSudo(command: String): String {

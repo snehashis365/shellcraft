@@ -1,10 +1,7 @@
+@file:Suppress("DEPRECATION")
+
 package com.snehashis.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -25,9 +22,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.NetworkCheck
@@ -47,7 +42,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -66,6 +60,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.snehashis.core.security.SecretCipher
+import com.snehashis.data.local.LlmSettingsMigration
 import com.snehashis.data.local.SecuritySettings
 import com.snehashis.domain.model.ByokProviderPreset
 import com.snehashis.domain.model.EndpointTestResult
@@ -113,10 +108,25 @@ fun SettingsScreen(
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
 
-    var providerType by remember(llmConfig) { mutableStateOf(llmConfig.providerType) }
-    var byokPreset by remember(llmConfig) { mutableStateOf(llmConfig.byokPreset) }
+    val initialNormalizedProvider = remember(llmConfig.providerType) {
+        if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL) LlmProviderType.OPENAI_COMPATIBLE else llmConfig.providerType
+    }
+    val initialNormalizedPreset = remember(llmConfig.providerType, llmConfig.byokPreset) {
+        if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL) ByokProviderPreset.LOCAL_OLLAMA else llmConfig.byokPreset
+    }
+
+    var providerType by remember(llmConfig) { mutableStateOf(initialNormalizedProvider) }
+    var byokPreset by remember(llmConfig) { mutableStateOf(initialNormalizedPreset) }
     var geminiModel by remember(llmConfig) { mutableStateOf(llmConfig.geminiModel) }
-    var customEndpoint by remember(llmConfig) { mutableStateOf(llmConfig.customEndpointUrl) }
+    var customEndpoint by remember(llmConfig) {
+        mutableStateOf(
+            if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL) {
+                LlmSettingsMigration.normalizeOllamaV1Url(llmConfig.customEndpointUrl)
+            } else {
+                llmConfig.customEndpointUrl
+            }
+        )
+    }
     var customModel by remember(llmConfig) { mutableStateOf(llmConfig.customModelName) }
     var customApiKey by remember { mutableStateOf("") }
     var timeoutSeconds by remember(llmConfig) { mutableStateOf(llmConfig.timeoutSeconds) }
@@ -128,18 +138,25 @@ fun SettingsScreen(
     var isTestingLlm by remember { mutableStateOf(false) }
     var showModelPicker by remember { mutableStateOf(false) }
 
-    var ghEnabled by remember(githubConfig) { mutableStateOf(githubConfig.enabled) }
-    var ghOwnerRepo by remember(githubConfig) { mutableStateOf(githubConfig.ownerRepo) }
-    var ghBranch by remember(githubConfig) { mutableStateOf(githubConfig.branch) }
-    var ghDir by remember(githubConfig) { mutableStateOf(githubConfig.pluginsDirectory) }
-    var ghPat by remember { mutableStateOf("") }
-    var ghPolicy by remember(githubConfig) { mutableStateOf(githubConfig.syncPolicy) }
-
     LaunchedEffect(llmConfig) {
-        providerType = llmConfig.providerType
-        byokPreset = llmConfig.byokPreset
+        val normProv = if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL) {
+            LlmProviderType.OPENAI_COMPATIBLE
+        } else {
+            llmConfig.providerType
+        }
+        val normPreset = if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL) {
+            ByokProviderPreset.LOCAL_OLLAMA
+        } else {
+            llmConfig.byokPreset
+        }
+        providerType = normProv
+        byokPreset = normPreset
         geminiModel = llmConfig.geminiModel
-        customEndpoint = llmConfig.customEndpointUrl
+        customEndpoint = if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL) {
+            LlmSettingsMigration.normalizeOllamaV1Url(llmConfig.customEndpointUrl)
+        } else {
+            llmConfig.customEndpointUrl
+        }
         customModel = llmConfig.customModelName
         timeoutSeconds = llmConfig.timeoutSeconds
         onDeviceFallbackEnabled = llmConfig.onDeviceFallbackEnabled
@@ -213,18 +230,19 @@ fun SettingsScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 840.dp),
+                .widthIn(max = 840.dp)
+                .testTag("settings_lazy_column"),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
                 SectionHeader(
                     title = "Configuration",
-                    subtitle = "LLM backends, GitHub repository sync, and biometric safety policy"
+                    subtitle = "LLM backends, themes & 3D visuals, GitHub sync, and biometric sudo policy"
                 )
             }
 
-            // 1. Configurable LLM Backends
+            // 1. Configurable LLM Backends (3 Consolidated Modes: Cloud Gemini, BYOK / Local API, On-Device Nano)
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
@@ -254,48 +272,21 @@ fun SettingsScreen(
                                 modifier = Modifier.testTag("llm_gemini_chip")
                             )
                             FilterChip(
-                                selected = providerType == LlmProviderType.OLLAMA_LOCAL,
-                                onClick = {
-                                    if (providerType != LlmProviderType.OLLAMA_LOCAL) {
-                                        providerType = LlmProviderType.OLLAMA_LOCAL
-                                        if (llmConfig.providerType == LlmProviderType.OLLAMA_LOCAL &&
-                                            llmConfig.customEndpointUrl.isNotBlank()
-                                        ) {
-                                            customEndpoint = llmConfig.customEndpointUrl
-                                            customModel = llmConfig.customModelName
-                                        } else if (customEndpoint.startsWith("https://") ||
-                                            ByokProviderPreset.entries.any { customEndpoint == it.defaultBaseUrl }
-                                        ) {
-                                            customEndpoint = "http://192.168.1.100:11434"
-                                            customModel = "qwen2.5-coder:7b"
-                                        }
-                                        llmTestResult = null
-                                        onClearModelDiscovery()
-                                    }
-                                },
-                                label = { Text("Local Ollama") },
-                                modifier = Modifier.testTag("llm_ollama_chip")
-                            )
-                            FilterChip(
                                 selected = providerType == LlmProviderType.OPENAI_COMPATIBLE,
                                 onClick = {
                                     if (providerType != LlmProviderType.OPENAI_COMPATIBLE) {
                                         providerType = LlmProviderType.OPENAI_COMPATIBLE
                                         val slot = llmConfig.presetSlots[byokPreset]
                                         customEndpoint = slot?.endpointUrl?.takeIf { it.isNotBlank() }
-                                            ?: if (llmConfig.providerType == LlmProviderType.OPENAI_COMPATIBLE &&
-                                                llmConfig.customEndpointUrl.isNotBlank()
-                                            ) llmConfig.customEndpointUrl else byokPreset.defaultBaseUrl
+                                            ?: byokPreset.defaultBaseUrl
                                         customModel = slot?.modelName?.takeIf { it.isNotBlank() }
-                                            ?: if (llmConfig.providerType == LlmProviderType.OPENAI_COMPATIBLE &&
-                                                llmConfig.customModelName.isNotBlank()
-                                            ) llmConfig.customModelName else byokPreset.defaultModel
+                                            ?: byokPreset.defaultModel
                                         customApiKey = ""
                                         llmTestResult = null
                                         onClearModelDiscovery()
                                     }
                                 },
-                                label = { Text("BYOK Cloud (API)") },
+                                label = { Text("BYOK / Local API") },
                                 leadingIcon = {
                                     Icon(Icons.Filled.Key, contentDescription = null, modifier = Modifier.size(16.dp))
                                 },
@@ -327,7 +318,7 @@ fun SettingsScreen(
                                     }
                                 }
                                 Text(
-                                    text = "Uses Firebase AI Logic with App Check attestation (no API key). To use your own free API key quota instead, choose BYOK Cloud (API) → Gemini AI Studio.",
+                                    text = "Uses Firebase AI Logic with App Check attestation (no API key). For Gemini AI Studio keys, Ollama, NVIDIA NIM, Groq, or OpenRouter, choose BYOK / Local API.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -350,74 +341,76 @@ fun SettingsScreen(
                             }
 
                             LlmProviderType.OLLAMA_LOCAL, LlmProviderType.OPENAI_COMPATIBLE -> {
-                                if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
-                                    Text(
-                                        text = "Provider Preset (Free Key Tiers & OpenAI-Compatible Endpoints)",
-                                        style = MaterialTheme.typography.labelLarge
-                                    )
-                                    Row(
-                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        ByokProviderPreset.entries.forEach { preset ->
-                                            FilterChip(
-                                                selected = byokPreset == preset,
-                                                onClick = {
-                                                    byokPreset = preset
-                                                    val slot = llmConfig.presetSlots[preset]
-                                                    customEndpoint = slot?.endpointUrl?.takeIf { it.isNotBlank() }
-                                                        ?: preset.defaultBaseUrl
-                                                    customModel = slot?.modelName?.takeIf { it.isNotBlank() }
-                                                        ?: preset.defaultModel
-                                                    customApiKey = ""
-                                                    llmTestResult = null
-                                                    onClearModelDiscovery()
-                                                },
-                                                label = { Text(preset.displayName) },
-                                                modifier = Modifier.testTag("byok_preset_${preset.name.lowercase()}")
-                                            )
-                                        }
+                                Text(
+                                    text = "OpenAI-Compatible Presets (Cloud Free Tiers & Local Ollama / vLLM)",
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    ByokProviderPreset.entries.forEach { preset ->
+                                        FilterChip(
+                                            selected = byokPreset == preset,
+                                            onClick = {
+                                                byokPreset = preset
+                                                val slot = llmConfig.presetSlots[preset]
+                                                customEndpoint = slot?.endpointUrl?.takeIf { it.isNotBlank() }
+                                                    ?: preset.defaultBaseUrl
+                                                customModel = slot?.modelName?.takeIf { it.isNotBlank() }
+                                                    ?: preset.defaultModel
+                                                customApiKey = ""
+                                                llmTestResult = null
+                                                onClearModelDiscovery()
+                                            },
+                                            label = { Text(preset.displayName) },
+                                            modifier = Modifier.testTag("byok_preset_${preset.name.lowercase()}")
+                                        )
                                     }
+                                }
 
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                                        shape = MaterialTheme.shapes.small,
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                    shape = MaterialTheme.shapes.small,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("byok_preset_info_card")
+                                ) {
+                                    Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .testTag("byok_preset_info_card")
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(horizontal = 12.dp, vertical = 10.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = byokPreset.freeTierSummary,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            if (byokPreset.apiKeyPortalUrl.isNotBlank()) {
-                                                Spacer(modifier = Modifier.width(8.dp))
-                                                OutlinedButton(
-                                                    onClick = {
-                                                        runCatching { uriHandler.openUri(byokPreset.apiKeyPortalUrl) }
-                                                    },
-                                                    modifier = Modifier
-                                                        .heightIn(min = 48.dp)
-                                                        .testTag("byok_get_key_button")
-                                                ) {
-                                                    Icon(
-                                                        Icons.AutoMirrored.Filled.OpenInNew,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(15.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text("Get Free Key")
-                                                }
+                                        Text(
+                                            text = if (byokPreset == ByokProviderPreset.LOCAL_OLLAMA) {
+                                                "${byokPreset.freeTierSummary}. Tip: run `OLLAMA_HOST=0.0.0.0:11434` for LAN access."
+                                            } else {
+                                                byokPreset.freeTierSummary
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (byokPreset.apiKeyPortalUrl.isNotBlank()) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            OutlinedButton(
+                                                onClick = {
+                                                    runCatching { uriHandler.openUri(byokPreset.apiKeyPortalUrl) }
+                                                },
+                                                modifier = Modifier
+                                                    .heightIn(min = 48.dp)
+                                                    .testTag("byok_get_key_button")
+                                            ) {
+                                                Icon(
+                                                    Icons.AutoMirrored.Filled.OpenInNew,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Text("Get Free Key")
                                             }
                                         }
                                     }
@@ -427,19 +420,10 @@ fun SettingsScreen(
                                     value = customEndpoint,
                                     onValueChange = { customEndpoint = it },
                                     label = { Text("Endpoint Base URL") },
-                                    placeholder = {
-                                        Text(
-                                            if (providerType == LlmProviderType.OLLAMA_LOCAL) "http://192.168.1.100:11434"
-                                            else byokPreset.defaultBaseUrl
-                                        )
-                                    },
+                                    placeholder = { Text(byokPreset.defaultBaseUrl) },
                                     trailingIcon = {
-                                        if (providerType == LlmProviderType.OPENAI_COMPATIBLE &&
-                                            customEndpoint != byokPreset.defaultBaseUrl
-                                        ) {
-                                            IconButton(
-                                                onClick = { customEndpoint = byokPreset.defaultBaseUrl }
-                                            ) {
+                                        if (customEndpoint != byokPreset.defaultBaseUrl) {
+                                            IconButton(onClick = { customEndpoint = byokPreset.defaultBaseUrl }) {
                                                 Icon(
                                                     Icons.Filled.Refresh,
                                                     contentDescription = "Reset URL to preset default"
@@ -448,30 +432,34 @@ fun SettingsScreen(
                                         }
                                     },
                                     singleLine = true,
-                                    modifier = Modifier.fillMaxWidth().testTag("llm_endpoint_input")
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("llm_endpoint_input")
                                 )
 
-                                if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
-                                    OutlinedTextField(
-                                        value = customApiKey,
-                                        onValueChange = { customApiKey = it },
-                                        label = {
-                                            Text(
-                                                if (hasSavedKeyForPreset) {
+                                OutlinedTextField(
+                                    value = customApiKey,
+                                    onValueChange = { customApiKey = it },
+                                    label = {
+                                        Text(
+                                            when {
+                                                hasSavedKeyForPreset ->
                                                     "Saved for ${byokPreset.displayName} — leave blank to keep"
-                                                } else {
+                                                byokPreset == ByokProviderPreset.LOCAL_OLLAMA ->
+                                                    "API Key (Optional for Local Ollama)"
+                                                else ->
                                                     "API Key (${byokPreset.keyHint})"
-                                                }
-                                            )
-                                        },
-                                        placeholder = { Text(byokPreset.keyHint) },
-                                        visualTransformation = PasswordVisualTransformation(),
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth().testTag("llm_apikey_input")
-                                    )
-                                }
+                                            }
+                                        )
+                                    },
+                                    placeholder = { Text(byokPreset.keyHint) },
+                                    visualTransformation = PasswordVisualTransformation(),
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("llm_apikey_input")
+                                )
 
-                                // Dynamic Model Selector Card + Quick-Pick Chips
                                 Surface(
                                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                                     shape = MaterialTheme.shapes.medium,
@@ -616,7 +604,9 @@ fun SettingsScreen(
                             OutlinedButton(
                                 onClick = runTestAndDiscover,
                                 enabled = !isTestingLlm,
-                                modifier = Modifier.heightIn(min = 48.dp).testTag("test_llm_button")
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("test_llm_button")
                             ) {
                                 if (isTestingLlm) {
                                     CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -649,7 +639,10 @@ fun SettingsScreen(
                                     )
                                     customApiKey = ""
                                 },
-                                modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("save_llm_button")
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 48.dp)
+                                    .testTag("save_llm_button")
                             ) {
                                 Icon(Icons.Filled.Save, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(6.dp))
@@ -660,184 +653,39 @@ fun SettingsScreen(
                 }
             }
 
-            // 2. Opt-in GitHub Repository Sync
+            // 2. Appearance, Default GUI Style & Heavy Animation Toggle
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(Icons.Filled.CloudSync, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                Column {
-                                    Text("GitHub Plugin Sync (Opt-In)", style = MaterialTheme.typography.titleMedium)
-                                    Text(
-                                        text = if (ghEnabled) "Checks repo before generating plugins" else "Defaulting to local Room storage",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                            Switch(
-                                checked = ghEnabled,
-                                onCheckedChange = { ghEnabled = it },
-                                modifier = Modifier.testTag("github_enable_switch")
-                            )
-                        }
-
-                        if (ghEnabled) {
-                            OutlinedTextField(
-                                value = ghOwnerRepo,
-                                onValueChange = { ghOwnerRepo = it },
-                                label = { Text("Repository (owner/repo)") },
-                                placeholder = { Text("acme-ops/shellcraft-plugins") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("github_repo_input")
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(
-                                    value = ghBranch,
-                                    onValueChange = { ghBranch = it },
-                                    label = { Text("Branch") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("github_branch_input")
-                                )
-                                OutlinedTextField(
-                                    value = ghDir,
-                                    onValueChange = { ghDir = it },
-                                    label = { Text("Directory") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("github_dir_input")
-                                )
-                            }
-                            OutlinedTextField(
-                                value = ghPat,
-                                onValueChange = { ghPat = it },
-                                label = {
-                                    Text(
-                                        if (githubConfig.encryptedPat.isBlank()) "GitHub PAT (for private repos & publishing)"
-                                        else "New PAT (leave blank to keep stored token)"
-                                    )
-                                },
-                                visualTransformation = PasswordVisualTransformation(),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("github_pat_input")
-                            )
-
-                            Text("Sync Trigger Policy", style = MaterialTheme.typography.labelLarge)
-                            Row(
-                                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                GitHubSyncPolicy.entries.forEach { policy ->
-                                    FilterChip(
-                                        selected = ghPolicy == policy,
-                                        onClick = { ghPolicy = policy },
-                                        label = { Text(policy.name.replace("_", " ")) }
-                                    )
-                                }
-                            }
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (ghEnabled && githubConfig.isConfigured) {
-                                OutlinedButton(
-                                    onClick = onSyncNow,
-                                    modifier = Modifier.heightIn(min = 48.dp).testTag("settings_sync_now_button")
-                                ) {
-                                    Text("Sync Now")
-                                }
-                            }
-                            Button(
-                                onClick = {
-                                    onSaveGitHubConfig(
-                                        ghEnabled,
-                                        ghOwnerRepo,
-                                        ghBranch,
-                                        ghDir,
-                                        ghPat.takeIf { it.isNotBlank() },
-                                        ghPolicy
-                                    )
-                                },
-                                modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("save_github_button")
-                            ) {
-                                Text("Save Sync Policy")
-                            }
-                        }
-                    }
-                }
+                AppearanceAndForgeSettingsCard(
+                    securitySettings = securitySettings,
+                    onUpdateSecurity = onUpdateSecurity
+                )
             }
 
-            // 3. Security & Tactile Experience
+            // 3. Opt-in GitHub Repository Sync
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text("Security & Tactile UX", style = MaterialTheme.typography.titleMedium)
-
-                        SettingToggleRow(
-                            title = "Biometric Superuser Authorization",
-                            subtitle = "Require fingerprint/face/PIN before sudo elevation",
-                            checked = securitySettings.requireBiometricForSudo,
-                            onCheckedChange = {
-                                onUpdateSecurity(securitySettings.copy(requireBiometricForSudo = it))
-                            },
-                            testTag = "toggle_biometric_sudo"
-                        )
-                        SettingToggleRow(
-                            title = "Confirm Moderate-Risk Actions",
-                            subtitle = "Prompt before mutating services or files (High/Critical always prompt)",
-                            checked = securitySettings.confirmModerateCommands,
-                            onCheckedChange = {
-                                onUpdateSecurity(securitySettings.copy(confirmModerateCommands = it))
-                            },
-                            testTag = "toggle_confirm_moderate"
-                        )
-                        SettingToggleRow(
-                            title = "Tactile Haptic Feedback",
-                            subtitle = "Vibration pulses for switches, execution, and safety warnings",
-                            checked = securitySettings.hapticsEnabled,
-                            onCheckedChange = {
-                                onUpdateSecurity(securitySettings.copy(hapticsEnabled = it))
-                            },
-                            testTag = "toggle_haptics"
-                        )
-                        SettingToggleRow(
-                            title = "Dark Carbon Workstation Theme",
-                            subtitle = "Switch between Dark Carbon and Light Studio palettes",
-                            checked = securitySettings.darkTheme,
-                            onCheckedChange = {
-                                onUpdateSecurity(securitySettings.copy(darkTheme = it))
-                            },
-                            testTag = "toggle_dark_theme"
-                        )
-                    }
-                }
+                GitHubSyncSettingsCard(
+                    githubConfig = githubConfig,
+                    onSaveGitHubConfig = onSaveGitHubConfig,
+                    onSyncNow = onSyncNow
+                )
             }
 
-            // 4. Plugin Architecture Docs
+            // 4. Security & Tactile Experience
+            item {
+                SecuritySettingsCard(
+                    securitySettings = securitySettings,
+                    onUpdateSecurity = onUpdateSecurity
+                )
+            }
+
+            // 5. Plugin Architecture Docs
             item {
                 OutlinedButton(
                     onClick = onOpenSchemaDocs,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 50.dp).testTag("settings_plugin_docs_button")
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 50.dp)
+                        .testTag("settings_plugin_docs_button")
                 ) {
                     Icon(Icons.Filled.Code, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
@@ -848,13 +696,8 @@ fun SettingsScreen(
     }
 
     if (showModelPicker) {
-        val providerTitle = if (providerType == LlmProviderType.OLLAMA_LOCAL) {
-            "Local Ollama"
-        } else {
-            byokPreset.displayName
-        }
         ModelPickerDialog(
-            providerTitle = providerTitle,
+            providerTitle = byokPreset.displayName,
             currentModel = customModel,
             discoveredModels = discoveredModels,
             isRefreshing = isTestingLlm || modelDiscoveryState is ModelDiscoveryState.Discovering,
@@ -864,221 +707,3 @@ fun SettingsScreen(
         )
     }
 }
-
-@Composable
-private fun SettingToggleRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    testTag: String
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = Modifier.testTag(testTag)
-        )
-    }
-}
-
-@Composable
-private fun OnDeviceNanoConfigSection(
-    status: OnDeviceModelStatus,
-    condenseDocs: Boolean,
-    onCondenseDocsChange: (Boolean) -> Unit,
-    fallbackEnabled: Boolean,
-    onFallbackEnabledChange: (Boolean) -> Unit,
-    fallbackProvider: LlmProviderType,
-    onFallbackProviderChange: (LlmProviderType) -> Unit,
-    temperature: Float,
-    onTemperatureChange: (Float) -> Unit,
-    onCheckStatus: () -> Unit,
-    onDownloadModel: () -> Unit
-) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("ondevice_diagnostics_card")
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.Memory,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.tertiary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Text(
-                        text = "Gemini Nano · Android AICore",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                }
-                Surface(
-                    color = MaterialTheme.colorScheme.tertiaryContainer,
-                    shape = MaterialTheme.shapes.small
-                ) {
-                    Text(
-                        text = "BETA",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-            }
-
-            val (statusLabel, statusTint) = when (status) {
-                OnDeviceModelStatus.Checking -> "Checking AICore availability..." to MaterialTheme.colorScheme.onSurfaceVariant
-                OnDeviceModelStatus.Available -> "Ready on-device (NPU / GPU / CPU managed by AICore)" to MaterialTheme.colorScheme.secondary
-                OnDeviceModelStatus.Downloadable -> "Model supported · ready to download via AICore" to MaterialTheme.colorScheme.primary
-                is OnDeviceModelStatus.Downloading -> {
-                    val mb = status.bytesDownloaded / (1024.0 * 1024.0)
-                    val dlText = if (status.bytesDownloaded > 0L) {
-                        "Downloading Gemini Nano via AICore (%.1f MB)...".format(mb)
-                    } else {
-                        "Downloading Gemini Nano via AICore..."
-                    }
-                    dlText to MaterialTheme.colorScheme.primary
-                }
-                is OnDeviceModelStatus.Unavailable -> "Unavailable: ${status.reason}" to MaterialTheme.colorScheme.error
-                is OnDeviceModelStatus.Error -> "Error: ${status.message}" to MaterialTheme.colorScheme.error
-            }
-
-            Text(
-                text = statusLabel,
-                style = MaterialTheme.typography.bodySmall,
-                color = statusTint,
-                modifier = Modifier.testTag("ondevice_status_text")
-            )
-
-            if (status is OnDeviceModelStatus.Downloading || status is OnDeviceModelStatus.Checking) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onCheckStatus,
-                    modifier = Modifier
-                        .heightIn(min = 48.dp)
-                        .testTag("ondevice_check_status_button")
-                ) {
-                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Check Status")
-                }
-                if (status is OnDeviceModelStatus.Downloadable || status is OnDeviceModelStatus.Error) {
-                    Button(
-                        onClick = onDownloadModel,
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .testTag("ondevice_download_button")
-                    ) {
-                        Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Download via AICore")
-                    }
-                }
-            }
-
-            Text(
-                text = "Runs 100% offline via Android Private Compute Services (zero bundled weights). Keep ShellCraft in the foreground while generating.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            SettingToggleRow(
-                title = "Condense CLI Docs (4k-token Guard)",
-                subtitle = "Extract synopsis, subcommands, and flags before prompting Gemini Nano",
-                checked = condenseDocs,
-                onCheckedChange = onCondenseDocsChange,
-                testTag = "ondevice_condense_switch"
-            )
-
-            SettingToggleRow(
-                title = "Auto-Fallback to Remote Backend",
-                subtitle = "Retry on Cloud Gemini or LAN LLM if AICore is unsupported, downloading, or over-quota",
-                checked = fallbackEnabled,
-                onCheckedChange = onFallbackEnabledChange,
-                testTag = "ondevice_fallback_switch"
-            )
-
-            AnimatedVisibility(
-                visible = fallbackEnabled,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = "Fallback Backend (uses its saved endpoint/model settings)",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf(
-                            LlmProviderType.FIREBASE_GEMINI to "Cloud Gemini",
-                            LlmProviderType.OLLAMA_LOCAL to "Local Ollama",
-                            LlmProviderType.OPENAI_COMPATIBLE to "BYOK Cloud (API)"
-                        ).forEach { (type, label) ->
-                            FilterChip(
-                                selected = fallbackProvider == type,
-                                onClick = { onFallbackProviderChange(type) },
-                                label = { Text(label) },
-                                modifier = Modifier.testTag("ondevice_fallback_${type.name.lowercase()}")
-                            )
-                        }
-                    }
-                }
-            }
-
-            Text("Sampling Temperature", style = MaterialTheme.typography.labelLarge)
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(0.1f to "0.1 (Strict)", 0.2f to "0.2 (Balanced)", 0.4f to "0.4 (Creative)").forEach { (temp, label) ->
-                    FilterChip(
-                        selected = kotlin.math.abs(temperature - temp) < 0.05f,
-                        onClick = { onTemperatureChange(temp) },
-                        label = { Text(label) },
-                        modifier = Modifier.testTag("ondevice_temp_${(temp * 10).toInt()}")
-                    )
-                }
-            }
-        }
-    }
-}
-

@@ -16,6 +16,7 @@ import com.snehashis.domain.model.ForgeState
 import com.snehashis.domain.model.LlmProviderType
 import com.snehashis.domain.model.OnDeviceModelStatus
 import com.snehashis.domain.model.PluginAnalysisSource
+import com.snehashis.domain.model.PluginGuiStyle
 import com.snehashis.service.ForgeGenerationService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -108,7 +109,9 @@ object AppContainer {
         sourceMode: PluginAnalysisSource,
         manualDocs: String,
         osHint: String,
-        bypassCheck: Boolean
+        bypassCheck: Boolean,
+        guiStyle: PluginGuiStyle = PluginGuiStyle.MODULAR_DASHBOARD,
+        customInstructions: String = ""
     ) {
         val appCtx = context.applicationContext
         ensureInitialized(appCtx)
@@ -182,9 +185,10 @@ object AppContainer {
                     }
                 }
 
+                @Suppress("DEPRECATION")
                 val providerLabel = when (activeLlm.providerType) {
                     LlmProviderType.FIREBASE_GEMINI -> "Gemini (${activeLlm.geminiModel})"
-                    LlmProviderType.OLLAMA_LOCAL -> "Ollama (${activeLlm.customModelName})"
+                    LlmProviderType.OLLAMA_LOCAL -> "Local Ollama (${activeLlm.customModelName})"
                     LlmProviderType.OPENAI_COMPATIBLE -> {
                         val prefix = if (activeLlm.byokPreset == ByokProviderPreset.CUSTOM) "Custom LLM"
                         else activeLlm.byokPreset.displayName
@@ -194,7 +198,7 @@ object AppContainer {
                 }
 
                 _forgeState.value = ForgeState.AnalyzingWithLlm(
-                    statusMessage = "Synthesizing `$commandName` GUI via $providerLabel...",
+                    statusMessage = "Synthesizing `$commandName` (${guiStyle.displayName}) via $providerLabel...",
                     rawDocsPreview = docsToAnalyze.take(600)
                 )
 
@@ -203,6 +207,8 @@ object AppContainer {
                     rawDocs = docsToAnalyze,
                     remoteOsHint = osHint,
                     config = activeLlm,
+                    guiStyle = guiStyle,
+                    customInstructions = customInstructions,
                     onProgress = { progress ->
                         _forgeState.value = ForgeState.AnalyzingWithLlm(
                             statusMessage = "$providerLabel: $progress",

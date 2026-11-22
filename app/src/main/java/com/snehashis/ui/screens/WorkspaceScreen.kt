@@ -60,6 +60,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -70,12 +72,17 @@ import androidx.compose.ui.unit.dp
 import com.snehashis.R
 import com.snehashis.data.local.ExecutionLogEntity
 import com.snehashis.domain.model.CliPlugin
+import com.snehashis.domain.model.PluginGuiStyle
 import com.snehashis.domain.model.SshConnectionState
 import com.snehashis.domain.model.SshHostProfile
 import com.snehashis.ui.components.GlowSurfaceCard
+import com.snehashis.ui.components.HeroSceneMode
 import com.snehashis.ui.components.SectionHeader
+import com.snehashis.ui.components.ThreeJsHeroCanvas
 import com.snehashis.ui.components.springPressScale
 import com.snehashis.ui.theme.JetBrainsMonoFontFamily
+import com.snehashis.ui.theme.LocalDisableHeavyAnimations
+import com.snehashis.ui.theme.LocalExpressiveAccents
 
 @Composable
 fun WorkspaceScreen(
@@ -244,16 +251,23 @@ private fun ConnectionHeroCard(
     onReconnectLast: () -> Unit,
     onOpenForge: () -> Unit
 ) {
-    val pulseTransition = rememberInfiniteTransition(label = "sshPulse")
-    val pulseAlpha by pulseTransition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(850),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseAlpha"
-    )
+    val disableHeavyAnimations = LocalDisableHeavyAnimations.current
+    val accents = LocalExpressiveAccents.current
+    val pulseAlpha = if (disableHeavyAnimations) {
+        1f
+    } else {
+        val pulseTransition = rememberInfiniteTransition(label = "sshPulse")
+        val anim by pulseTransition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(850),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "pulseAlpha"
+        )
+        anim
+    }
 
     val accentColor = when (connectionState) {
         is SshConnectionState.Connected -> MaterialTheme.colorScheme.secondary
@@ -262,148 +276,201 @@ private fun ConnectionHeroCard(
         is SshConnectionState.Disconnected -> MaterialTheme.colorScheme.primary
     }
 
+    val (heroStateName, heroSpeed, heroPulse, heroSecondary) = when (connectionState) {
+        is SshConnectionState.Connected -> HeroParams("connected", 1.35f, 0.72f, MaterialTheme.colorScheme.primary)
+        is SshConnectionState.Connecting -> HeroParams("connecting", 2.0f, 0.9f, accents.violet)
+        is SshConnectionState.Error -> HeroParams("error", 0.55f, 0.45f, MaterialTheme.colorScheme.tertiary)
+        is SshConnectionState.Disconnected -> HeroParams("idle", 0.75f, 0.28f, accents.violet)
+    }
+
     GlowSurfaceCard(
         accentColor = accentColor,
         isPulsing = connectionState is SshConnectionState.Connected || connectionState is SshConnectionState.Connecting
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        Box(modifier = Modifier.fillMaxWidth()) {
+            ThreeJsHeroCanvas(
+                mode = HeroSceneMode.SSH_TELEMETRY,
+                stateName = heroStateName,
+                primaryColor = accentColor,
+                secondaryColor = heroSecondary,
+                speed = heroSpeed,
+                pulse = heroPulse,
+                modifier = Modifier
+                    .matchParentSize()
+                    .testTag("ssh_hero_canvas")
+            )
+
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.horizontalGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.88f),
+                                MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.58f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(11.dp)
-                            .alpha(if (connectionState is SshConnectionState.Connected) pulseAlpha else 1f)
-                            .clip(CircleShape)
-                            .background(accentColor)
-                    )
-                    Text(
-                        text = when (connectionState) {
-                            is SshConnectionState.Connected -> "SSH ACTIVE · KEEP-ALIVE 15s"
-                            is SshConnectionState.Connecting -> "HANDSHAKING ${connectionState.hostLabel}..."
-                            is SshConnectionState.Error -> "TUNNEL INTERRUPTED"
-                            is SshConnectionState.Disconnected -> "STANDBY · READY TO CONNECT"
-                        },
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = accentColor
-                    )
-                }
-
-                if (connectionState is SshConnectionState.Connected) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        IconButton(
-                            onClick = onCheckHealthNow,
-                            modifier = Modifier.testTag("check_ssh_health_button")
-                        ) {
-                            Icon(
-                                Icons.Filled.MonitorHeart,
-                                contentDescription = "Verify SSH heartbeat now",
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = onDisconnect,
-                            modifier = Modifier.heightIn(min = 40.dp).testTag("disconnect_ssh_button")
-                        ) {
-                            Icon(Icons.Filled.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Disconnect")
-                        }
-                    }
-                }
-            }
-
-            when (connectionState) {
-                is SshConnectionState.Connected -> {
-                    Text(
-                        text = "${connectionState.host.username}@${connectionState.host.host}:${connectionState.host.port}",
-                        style = MaterialTheme.typography.headlineSmall.copy(fontFamily = JetBrainsMonoFontFamily)
-                    )
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        CapabilityPill(
-                            text = "${connectionState.env.osName} ${connectionState.env.architecture}".trim(),
-                            icon = Icons.Filled.Terminal
-                        )
-                        CapabilityPill(
-                            text = connectionState.env.shell.substringAfterLast('/')
-                        )
-                        connectionState.latencyMs?.let { rtt ->
-                            CapabilityPill(
-                                text = "${rtt}ms RTT",
-                                icon = Icons.Filled.MonitorHeart
-                            )
-                        }
-                        if (connectionState.env.hasSudo) {
-                            CapabilityPill(
-                                text = "sudo ready",
-                                icon = Icons.Filled.Lock
-                            )
-                        }
-                    }
-                    Button(
-                        onClick = onOpenForge,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("hero_forge_button")
-                    ) {
-                        Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Analyze Remote CLI Tool with AI")
-                    }
-                }
-                is SshConnectionState.Connecting -> {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(11.dp)
+                                .alpha(if (connectionState is SshConnectionState.Connected) pulseAlpha else 1f)
+                                .clip(CircleShape)
+                                .background(accentColor)
+                        )
                         Text(
-                            text = "Negotiating SSH keys and probing POSIX capabilities...",
+                            text = when (connectionState) {
+                                is SshConnectionState.Connected -> "SSH ACTIVE · KEEP-ALIVE 15s"
+                                is SshConnectionState.Connecting -> "HANDSHAKING ${connectionState.hostLabel}..."
+                                is SshConnectionState.Error -> "TUNNEL INTERRUPTED"
+                                is SshConnectionState.Disconnected -> "STANDBY · READY TO CONNECT"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = accentColor
+                        )
+                    }
+
+                    if (connectionState is SshConnectionState.Connected) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            IconButton(
+                                onClick = onCheckHealthNow,
+                                modifier = Modifier.testTag("check_ssh_health_button")
+                            ) {
+                                Icon(
+                                    Icons.Filled.MonitorHeart,
+                                    contentDescription = "Verify SSH heartbeat now",
+                                    tint = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = onDisconnect,
+                                modifier = Modifier
+                                    .heightIn(min = 40.dp)
+                                    .testTag("disconnect_ssh_button")
+                            ) {
+                                Icon(Icons.Filled.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Disconnect")
+                            }
+                        }
+                    }
+                }
+
+                when (connectionState) {
+                    is SshConnectionState.Connected -> {
+                        Text(
+                            text = "${connectionState.host.username}@${connectionState.host.host}:${connectionState.host.port}",
+                            style = MaterialTheme.typography.headlineSmall.copy(fontFamily = JetBrainsMonoFontFamily)
+                        )
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CapabilityPill(
+                                text = "${connectionState.env.osName} ${connectionState.env.architecture}".trim(),
+                                icon = Icons.Filled.Terminal
+                            )
+                            CapabilityPill(
+                                text = connectionState.env.shell.substringAfterLast('/')
+                            )
+                            connectionState.latencyMs?.let { rtt ->
+                                CapabilityPill(
+                                    text = "${rtt}ms RTT",
+                                    icon = Icons.Filled.MonitorHeart
+                                )
+                            }
+                            if (connectionState.env.hasSudo) {
+                                CapabilityPill(
+                                    text = "sudo ready",
+                                    icon = Icons.Filled.Lock
+                                )
+                            }
+                        }
+                        Button(
+                            onClick = onOpenForge,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("hero_forge_button")
+                        ) {
+                            Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Analyze Remote CLI Tool with AI")
+                        }
+                    }
+
+                    is SshConnectionState.Connecting -> {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.5.dp)
+                            Text(
+                                text = "Negotiating SSH keys and probing POSIX capabilities...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    is SshConnectionState.Error -> {
+                        Text(
+                            text = connectionState.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        if (hasAnyHost) {
+                            Button(
+                                onClick = onReconnectLast,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .testTag("reconnect_ssh_button")
+                            ) {
+                                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Reconnect SSH Tunnel")
+                            }
+                        }
+                    }
+
+                    is SshConnectionState.Disconnected -> {
+                        Text(
+                            text = "Connect to any Linux, macOS, or Windows OpenSSH host to probe `man` pages, browse files over SFTP, and run interactive GUI commands.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                is SshConnectionState.Error -> {
-                    Text(
-                        text = connectionState.message,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                    if (hasAnyHost) {
-                        Button(
-                            onClick = onReconnectLast,
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("reconnect_ssh_button")
-                        ) {
-                            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Reconnect SSH Tunnel")
-                        }
-                    }
-                }
-                is SshConnectionState.Disconnected -> {
-                    Text(
-                        text = "Connect to any Linux, macOS, or Windows OpenSSH host to probe `man` pages and run GUI-driven commands with automatic 15s keepalive monitoring.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
             }
         }
     }
 }
+
+private data class HeroParams(
+    val stateName: String,
+    val speed: Float,
+    val pulse: Float,
+    val secondaryColor: Color
+)
 
 @Composable
 private fun EmptyHostsCard(onAddHost: () -> Unit) {
@@ -437,7 +504,9 @@ private fun EmptyHostsCard(onAddHost: () -> Unit) {
             )
             Button(
                 onClick = onAddHost,
-                modifier = Modifier.heightIn(min = 48.dp).testTag("empty_add_host_button")
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("empty_add_host_button")
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null)
                 Spacer(modifier = Modifier.width(6.dp))
@@ -460,16 +529,18 @@ private fun HostProfileCard(
     Card(
         colors = CardDefaults.cardColors(
             containerColor = if (isConnected) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.42f)
             } else {
                 MaterialTheme.colorScheme.surfaceContainer
             }
         ),
         border = BorderStroke(
             1.dp,
-            if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+            if (isConnected) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline
         ),
-        modifier = Modifier.fillMaxWidth().testTag("host_card_${host.id}")
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("host_card_${host.id}")
     ) {
         Row(
             modifier = Modifier
@@ -547,12 +618,17 @@ private fun QuickPluginCard(
     onHapticTick: () -> Unit,
     onClick: () -> Unit
 ) {
+    val accents = LocalExpressiveAccents.current
+    val isHtml = plugin.uiMode == PluginGuiStyle.HTML_CANVAS_CUSTOM
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainer,
         shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+        border = BorderStroke(
+            1.dp,
+            if (isHtml) accents.violet.copy(alpha = 0.65f) else MaterialTheme.colorScheme.outline
+        ),
         modifier = Modifier
-            .width(178.dp)
+            .width(188.dp)
             .clip(MaterialTheme.shapes.medium)
             .springPressScale(onHapticTick = onHapticTick, onClick = onClick)
             .testTag("quick_plugin_${plugin.commandName}")
@@ -567,8 +643,8 @@ private fun QuickPluginCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.primary,
+                    color = if (isHtml) accents.violetContainer else MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = if (isHtml) accents.onVioletContainer else MaterialTheme.colorScheme.primary,
                     shape = MaterialTheme.shapes.extraSmall
                 ) {
                     Text(
@@ -592,9 +668,15 @@ private fun QuickPluginCard(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = "${plugin.actions.size} interactive actions",
+                text = buildString {
+                    append("${plugin.actions.size} actions")
+                    if (plugin.presets.isNotEmpty()) append(" · ${plugin.presets.size} presets")
+                    if (isHtml) append(" · HTML5")
+                },
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }

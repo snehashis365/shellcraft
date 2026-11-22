@@ -3,8 +3,28 @@ package com.snehashis.domain.model
 import kotlinx.serialization.Serializable
 
 @Serializable
+enum class ThemeMode(val displayName: String, val subtitle: String) {
+    SYSTEM("System Default", "Follow Android light/dark mode with vibrant ShellCraft palettes"),
+    NEON_DARK("Neon Midnight", "High-contrast obsidian surfaces with glowing cyan & emerald accents"),
+    DAYLIGHT_LIGHT("Vivid Daylight", "Crisp frosted daylight canvas with electric cobalt & teal accents")
+}
+
+@Serializable
+enum class PluginGuiStyle(val displayName: String, val subtitle: String) {
+    MODULAR_DASHBOARD(
+        displayName = "Modular Tool Dashboard",
+        subtitle = "Native widgets, sliders, quick presets, and row action buttons"
+    ),
+    HTML_CANVAS_CUSTOM(
+        displayName = "Custom HTML/Canvas GUI",
+        subtitle = "Sandboxed HTML5/Canvas interactive control deck with live bridge"
+    )
+}
+
+@Serializable
 enum class LlmProviderType {
     FIREBASE_GEMINI,
+    @Deprecated("Consolidated into OPENAI_COMPATIBLE with ByokProviderPreset.LOCAL_OLLAMA")
     OLLAMA_LOCAL,
     OPENAI_COMPATIBLE,
     ON_DEVICE_NANO_EXPERIMENTAL
@@ -51,9 +71,17 @@ enum class ByokProviderPreset(
         defaultModel = "meta-llama/llama-3.3-70b-instruct:free",
         freeTierSummary = "Single gateway with zero-cost ':free' community models"
     ),
+    LOCAL_OLLAMA(
+        displayName = "Local Ollama",
+        defaultBaseUrl = "http://192.168.1.100:11434/v1",
+        apiKeyPortalUrl = "",
+        keyHint = "Optional key (leave blank for LAN Ollama)",
+        defaultModel = "qwen2.5-coder:7b",
+        freeTierSummary = "Run local models via Ollama's OpenAI-compatible /v1 API (Zero cloud cost)"
+    ),
     CUSTOM(
         displayName = "Custom URL",
-        defaultBaseUrl = "http://192.168.1.100:1234",
+        defaultBaseUrl = "http://192.168.1.100:1234/v1",
         apiKeyPortalUrl = "",
         keyHint = "Optional Bearer API key",
         defaultModel = "qwen/qwen3.6-35b-a3b",
@@ -99,7 +127,7 @@ data class LlmBackendConfig(
     val providerType: LlmProviderType = LlmProviderType.FIREBASE_GEMINI,
     val byokPreset: ByokProviderPreset = ByokProviderPreset.CUSTOM,
     val geminiModel: String = "gemini-3.8-flash",
-    val customEndpointUrl: String = "http://192.168.1.100:11434",
+    val customEndpointUrl: String = "http://192.168.1.100:11434/v1",
     val customModelName: String = "qwen2.5-coder:7b",
     val encryptedApiKey: String = "",
     val presetSlots: Map<ByokProviderPreset, PresetCredentialSlot> = emptyMap(),
@@ -123,6 +151,19 @@ enum class PluginAnalysisSource {
     SSH_PROBE,
     MANUAL_DOCS
 }
+
+enum class ChatRole {
+    USER,
+    ASSISTANT
+}
+
+data class PluginChatTurn(
+    val id: String,
+    val role: ChatRole,
+    val message: String,
+    val pluginSnapshot: CliPlugin? = null,
+    val timestampMs: Long = System.currentTimeMillis()
+)
 
 sealed interface ForgeState {
     data object Idle : ForgeState

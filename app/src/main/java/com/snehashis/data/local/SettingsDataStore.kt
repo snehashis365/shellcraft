@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.snehashis.data.local
 
 import android.content.Context
@@ -16,7 +18,9 @@ import com.snehashis.domain.model.GitHubRepoConfig
 import com.snehashis.domain.model.GitHubSyncPolicy
 import com.snehashis.domain.model.LlmBackendConfig
 import com.snehashis.domain.model.LlmProviderType
+import com.snehashis.domain.model.PluginGuiStyle
 import com.snehashis.domain.model.PresetCredentialSlot
+import com.snehashis.domain.model.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -26,8 +30,43 @@ data class SecuritySettings(
     val requireBiometricForSudo: Boolean = true,
     val confirmModerateCommands: Boolean = true,
     val hapticsEnabled: Boolean = true,
-    val darkTheme: Boolean = true
+    val darkTheme: Boolean = true,
+    val themeMode: ThemeMode = ThemeMode.NEON_DARK,
+    val disableHeavyAnimations: Boolean = false,
+    val defaultForgeGuiStyle: PluginGuiStyle = PluginGuiStyle.MODULAR_DASHBOARD
 )
+
+object LlmSettingsMigration {
+    fun migrateLegacyProvider(
+        rawProvider: String?,
+        rawPreset: String?,
+        rawUrl: String
+    ): Triple<LlmProviderType, ByokProviderPreset, String> {
+        val parsedProvider = runCatching {
+            LlmProviderType.valueOf(rawProvider ?: LlmProviderType.FIREBASE_GEMINI.name)
+        }.getOrDefault(LlmProviderType.FIREBASE_GEMINI)
+
+        val parsedPreset = runCatching {
+            ByokProviderPreset.valueOf(rawPreset ?: ByokProviderPreset.GEMINI_AI_STUDIO.name)
+        }.getOrDefault(ByokProviderPreset.GEMINI_AI_STUDIO)
+
+        return if (parsedProvider == LlmProviderType.OLLAMA_LOCAL) {
+            Triple(
+                LlmProviderType.OPENAI_COMPATIBLE,
+                ByokProviderPreset.LOCAL_OLLAMA,
+                normalizeOllamaV1Url(rawUrl)
+            )
+        } else {
+            Triple(parsedProvider, parsedPreset, rawUrl.trim().trimEnd('/'))
+        }
+    }
+
+    fun normalizeOllamaV1Url(rawUrl: String): String {
+        val clean = rawUrl.trim().trimEnd('/')
+        if (clean.isBlank()) return ByokProviderPreset.LOCAL_OLLAMA.defaultBaseUrl
+        return if (clean.endsWith("/v1") || clean.endsWith("/openai")) clean else "$clean/v1"
+    }
+}
 
 class SettingsDataStore(private val context: Context) {
 
@@ -60,33 +99,41 @@ class SettingsDataStore(private val context: Context) {
         val CONFIRM_MODERATE = booleanPreferencesKey("confirm_moderate")
         val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
         val DARK_THEME = booleanPreferencesKey("dark_theme")
+        val THEME_MODE = stringPreferencesKey("theme_mode")
+        val DISABLE_HEAVY_ANIMATIONS = booleanPreferencesKey("disable_heavy_animations")
+        val DEFAULT_FORGE_GUI_STYLE = stringPreferencesKey("default_forge_gui_style")
     }
 
     val llmConfigFlow: Flow<LlmBackendConfig> = context.dataStore.data.map { prefs ->
-        val provider = runCatching {
-            LlmProviderType.valueOf(prefs[Keys.LLM_PROVIDER] ?: LlmProviderType.FIREBASE_GEMINI.name)
-        }.getOrDefault(LlmProviderType.FIREBASE_GEMINI)
-
-        val activePreset = runCatching {
-            ByokProviderPreset.valueOf(prefs[Keys.BYOK_PRESET] ?: ByokProviderPreset.GEMINI_AI_STUDIO.name)
-        }.getOrDefault(ByokProviderPreset.GEMINI_AI_STUDIO)
-
-        val legacyUrl = prefs[Keys.CUSTOM_ENDPOINT] ?: "http://192.168.1.100:11434"
+        val rawUrl = prefs[Keys.CUSTOM_ENDPOINT] ?: ByokProviderPreset.LOCAL_OLLAMA.defaultBaseUrl
+        val (provider, activePreset, normalizedLegacyUrl) = LlmSettingsMigration.migrateLegacyProvider(
+            rawProvider = prefs[Keys.LLM_PROVIDER],
+            rawPreset = prefs[Keys.BYOK_PRESET],
+            rawUrl = rawUrl
+        )
+        val wasLegacyOllama = prefs[Keys.LLM_PROVIDER] == LlmProviderType.OLLAMA_LOCAL.name
         val legacyModel = prefs[Keys.CUSTOM_MODEL] ?: "qwen2.5-coder:7b"
         val legacyKey = prefs[Keys.ENCRYPTED_LLM_KEY] ?: ""
 
         val slots = ByokProviderPreset.entries.associateWith { preset ->
-            val fallbackUrl = if (preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetUrlKey(preset))) {
-                legacyUrl
-            } else {
-                preset.defaultBaseUrl
+            val hasStoredUrl = prefs.contains(Keys.presetUrlKey(preset))
+            val fallbackUrl = when {
+                preset == ByokProviderPreset.LOCAL_OLLAMA && wasLegacyOllama && !hasStoredUrl ->
+                    normalizedLegacyUrl
+                preset == ByokProviderPreset.CUSTOM && !hasStoredUrl ->
+                    rawUrl
+                else -> preset.defaultBaseUrl
             }
-            val fallbackModel = if (preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetModelKey(preset))) {
-                legacyModel
-            } else {
-                preset.defaultModel
+            val fallbackModel = when {
+                preset == ByokProviderPreset.LOCAL_OLLAMA && wasLegacyOllama && !prefs.contains(Keys.presetModelKey(preset)) ->
+                    legacyModel
+                preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetModelKey(preset)) ->
+                    legacyModel
+                else -> preset.defaultModel
             }
-            val fallbackKey = if (preset == ByokProviderPreset.CUSTOM && !prefs.contains(Keys.presetEncryptedKey(preset))) {
+            val fallbackKey = if ((preset == ByokProviderPreset.CUSTOM || (preset == ByokProviderPreset.LOCAL_OLLAMA && wasLegacyOllama)) &&
+                !prefs.contains(Keys.presetEncryptedKey(preset))
+            ) {
                 legacyKey
             } else {
                 ""
@@ -99,9 +146,9 @@ class SettingsDataStore(private val context: Context) {
         }
 
         val resolvedUrl = if (provider == LlmProviderType.OPENAI_COMPATIBLE) {
-            slots[activePreset]?.endpointUrl ?: legacyUrl
+            slots[activePreset]?.endpointUrl ?: normalizedLegacyUrl
         } else {
-            legacyUrl
+            normalizedLegacyUrl
         }
         val resolvedModel = if (provider == LlmProviderType.OPENAI_COMPATIBLE) {
             slots[activePreset]?.modelName ?: legacyModel
@@ -114,6 +161,17 @@ class SettingsDataStore(private val context: Context) {
             legacyKey
         }
 
+        val rawFallbackProvider = runCatching {
+            LlmProviderType.valueOf(
+                prefs[Keys.ON_DEVICE_FALLBACK_PROVIDER] ?: LlmProviderType.FIREBASE_GEMINI.name
+            )
+        }.getOrDefault(LlmProviderType.FIREBASE_GEMINI)
+        val migratedFallbackProvider = if (rawFallbackProvider == LlmProviderType.OLLAMA_LOCAL) {
+            LlmProviderType.OPENAI_COMPATIBLE
+        } else {
+            rawFallbackProvider
+        }
+
         LlmBackendConfig(
             providerType = provider,
             byokPreset = activePreset,
@@ -124,11 +182,7 @@ class SettingsDataStore(private val context: Context) {
             presetSlots = slots,
             timeoutSeconds = prefs[Keys.LLM_TIMEOUT_SEC] ?: 240,
             onDeviceFallbackEnabled = prefs[Keys.ON_DEVICE_FALLBACK_ENABLED] ?: false,
-            onDeviceFallbackProvider = runCatching {
-                LlmProviderType.valueOf(
-                    prefs[Keys.ON_DEVICE_FALLBACK_PROVIDER] ?: LlmProviderType.FIREBASE_GEMINI.name
-                )
-            }.getOrDefault(LlmProviderType.FIREBASE_GEMINI),
+            onDeviceFallbackProvider = migratedFallbackProvider,
             onDeviceCondenseDocs = prefs[Keys.ON_DEVICE_CONDENSE_DOCS] ?: true,
             onDeviceTemperature = prefs[Keys.ON_DEVICE_TEMPERATURE] ?: 0.2f
         )
@@ -149,11 +203,23 @@ class SettingsDataStore(private val context: Context) {
     }
 
     val securitySettingsFlow: Flow<SecuritySettings> = context.dataStore.data.map { prefs ->
+        val legacyDark = prefs[Keys.DARK_THEME] ?: true
+        val themeMode = runCatching {
+            prefs[Keys.THEME_MODE]?.let { ThemeMode.valueOf(it) }
+        }.getOrNull() ?: if (legacyDark) ThemeMode.NEON_DARK else ThemeMode.DAYLIGHT_LIGHT
+
+        val defaultGui = runCatching {
+            prefs[Keys.DEFAULT_FORGE_GUI_STYLE]?.let { PluginGuiStyle.valueOf(it) }
+        }.getOrNull() ?: PluginGuiStyle.MODULAR_DASHBOARD
+
         SecuritySettings(
             requireBiometricForSudo = prefs[Keys.BIOMETRIC_SUDO] ?: true,
             confirmModerateCommands = prefs[Keys.CONFIRM_MODERATE] ?: true,
             hapticsEnabled = prefs[Keys.HAPTICS_ENABLED] ?: true,
-            darkTheme = prefs[Keys.DARK_THEME] ?: true
+            darkTheme = themeMode != ThemeMode.DAYLIGHT_LIGHT,
+            themeMode = themeMode,
+            disableHeavyAnimations = prefs[Keys.DISABLE_HEAVY_ANIMATIONS] ?: false,
+            defaultForgeGuiStyle = defaultGui
         )
     }
 
@@ -171,24 +237,38 @@ class SettingsDataStore(private val context: Context) {
         onDeviceTemperature: Float = 0.2f
     ) {
         context.dataStore.edit { prefs ->
-            prefs[Keys.LLM_PROVIDER] = providerType.name
-            prefs[Keys.BYOK_PRESET] = byokPreset.name
+            val effectiveProvider = if (providerType == LlmProviderType.OLLAMA_LOCAL) {
+                LlmProviderType.OPENAI_COMPATIBLE
+            } else {
+                providerType
+            }
+            val effectivePreset = if (providerType == LlmProviderType.OLLAMA_LOCAL) {
+                ByokProviderPreset.LOCAL_OLLAMA
+            } else {
+                byokPreset
+            }
+            prefs[Keys.LLM_PROVIDER] = effectiveProvider.name
+            prefs[Keys.BYOK_PRESET] = effectivePreset.name
             prefs[Keys.GEMINI_MODEL] = geminiModel.ifBlank { "gemini-3.8-flash" }
-            val cleanUrl = customEndpointUrl.trim().trimEnd('/')
+            val cleanUrl = if (effectivePreset == ByokProviderPreset.LOCAL_OLLAMA) {
+                LlmSettingsMigration.normalizeOllamaV1Url(customEndpointUrl)
+            } else {
+                customEndpointUrl.trim().trimEnd('/')
+            }
             val cleanModel = customModelName.trim()
             prefs[Keys.CUSTOM_ENDPOINT] = cleanUrl
             prefs[Keys.CUSTOM_MODEL] = cleanModel
 
-            if (providerType == LlmProviderType.OPENAI_COMPATIBLE) {
-                prefs[Keys.presetUrlKey(byokPreset)] = cleanUrl.ifBlank { byokPreset.defaultBaseUrl }
-                prefs[Keys.presetModelKey(byokPreset)] = cleanModel.ifBlank { byokPreset.defaultModel }
-                val existingSlotKey = prefs[Keys.presetEncryptedKey(byokPreset)] ?: ""
+            if (effectiveProvider == LlmProviderType.OPENAI_COMPATIBLE) {
+                prefs[Keys.presetUrlKey(effectivePreset)] = cleanUrl.ifBlank { effectivePreset.defaultBaseUrl }
+                prefs[Keys.presetModelKey(effectivePreset)] = cleanModel.ifBlank { effectivePreset.defaultModel }
+                val existingSlotKey = prefs[Keys.presetEncryptedKey(effectivePreset)] ?: ""
                 val resolvedEncryptedKey = if (plainApiKey != null) {
                     if (plainApiKey.isBlank()) "" else SecretCipher.encrypt(plainApiKey)
                 } else {
                     existingSlotKey
                 }
-                prefs[Keys.presetEncryptedKey(byokPreset)] = resolvedEncryptedKey
+                prefs[Keys.presetEncryptedKey(effectivePreset)] = resolvedEncryptedKey
                 prefs[Keys.ENCRYPTED_LLM_KEY] = resolvedEncryptedKey
             } else if (plainApiKey != null) {
                 prefs[Keys.ENCRYPTED_LLM_KEY] = if (plainApiKey.isBlank()) "" else SecretCipher.encrypt(plainApiKey)
@@ -196,10 +276,10 @@ class SettingsDataStore(private val context: Context) {
 
             prefs[Keys.LLM_TIMEOUT_SEC] = timeoutSeconds.coerceIn(30, 600)
             prefs[Keys.ON_DEVICE_FALLBACK_ENABLED] = onDeviceFallbackEnabled
-            prefs[Keys.ON_DEVICE_FALLBACK_PROVIDER] = if (onDeviceFallbackProvider == LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL) {
-                LlmProviderType.FIREBASE_GEMINI.name
-            } else {
-                onDeviceFallbackProvider.name
+            prefs[Keys.ON_DEVICE_FALLBACK_PROVIDER] = when (onDeviceFallbackProvider) {
+                LlmProviderType.ON_DEVICE_NANO_EXPERIMENTAL -> LlmProviderType.FIREBASE_GEMINI.name
+                LlmProviderType.OLLAMA_LOCAL -> LlmProviderType.OPENAI_COMPATIBLE.name
+                else -> onDeviceFallbackProvider.name
             }
             prefs[Keys.ON_DEVICE_CONDENSE_DOCS] = onDeviceCondenseDocs
             prefs[Keys.ON_DEVICE_TEMPERATURE] = onDeviceTemperature.coerceIn(0.0f, 1.0f)
@@ -237,7 +317,10 @@ class SettingsDataStore(private val context: Context) {
             prefs[Keys.BIOMETRIC_SUDO] = settings.requireBiometricForSudo
             prefs[Keys.CONFIRM_MODERATE] = settings.confirmModerateCommands
             prefs[Keys.HAPTICS_ENABLED] = settings.hapticsEnabled
-            prefs[Keys.DARK_THEME] = settings.darkTheme
+            prefs[Keys.THEME_MODE] = settings.themeMode.name
+            prefs[Keys.DARK_THEME] = settings.themeMode != ThemeMode.DAYLIGHT_LIGHT
+            prefs[Keys.DISABLE_HEAVY_ANIMATIONS] = settings.disableHeavyAnimations
+            prefs[Keys.DEFAULT_FORGE_GUI_STYLE] = settings.defaultForgeGuiStyle.name
         }
     }
 }

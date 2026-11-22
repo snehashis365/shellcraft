@@ -149,6 +149,7 @@ fun ShellCraftApp(
     val securitySettings by viewModel.securitySettings.collectAsStateWithLifecycle()
     val pendingExecution by viewModel.pendingExecution.collectAsStateWithLifecycle()
     val terminalState by viewModel.terminalState.collectAsStateWithLifecycle()
+    val sftpUploadStatus by viewModel.sftpUploadStatus.collectAsStateWithLifecycle()
     val bannerMessage by viewModel.bannerMessage.collectAsStateWithLifecycle()
     val modelDiscoveryState by viewModel.modelDiscoveryState.collectAsStateWithLifecycle()
 
@@ -171,7 +172,10 @@ fun ShellCraftApp(
         viewModel.clearBanner()
     }
 
-    ShellCraftTheme(darkTheme = securitySettings.darkTheme) {
+    ShellCraftTheme(
+        themeMode = securitySettings.themeMode,
+        disableHeavyAnimations = securitySettings.disableHeavyAnimations
+    ) {
         val backStackEntry by navController.currentBackStackEntryAsState()
         val currentDestination = backStackEntry?.destination
         val isRunnerScreen = currentDestination?.hasRoute<PluginRunnerRoute>() == true
@@ -398,6 +402,7 @@ fun ShellCraftApp(
                                         githubConfig = githubConfig,
                                         isSshConnected = connectionState is SshConnectionState.Connected,
                                         terminalState = terminalState,
+                                        sftpUploadStatus = sftpUploadStatus,
                                         onBack = { navController.popBackStack() },
                                         onExecute = { cmd, action, elevateSudo ->
                                             viewModel.requestCommandExecution(
@@ -411,6 +416,15 @@ fun ShellCraftApp(
                                         onSendInput = { text, isSecret -> viewModel.sendTerminalInput(text, isSecret) },
                                         onSendControl = { byte, label -> viewModel.sendTerminalControl(byte, label) },
                                         onExpandTerminal = { viewModel.reopenTerminal() },
+                                        onListRemoteDirectory = { path -> viewModel.listRemoteDirectory(path) },
+                                        onUploadPhoneFile = { uri -> viewModel.uploadPhoneFileToRemote(uri) },
+                                        onRequestAiRefinement = { currentPlugin, history, instruction ->
+                                            viewModel.refinePluginWithChat(currentPlugin, history, instruction)
+                                        },
+                                        onSaveRefinedPlugin = { updated ->
+                                            viewModel.savePlugin(updated, pushToGitHubIfEnabled = false)
+                                        },
+                                        onResetBuiltinPlugin = { id -> viewModel.resetBuiltinPlugin(id) },
                                         onPublishToGitHub = { viewModel.publishPluginToGitHub(it) },
                                         onExportJson = { viewModel.exportPluginJson(it) },
                                         onDeletePlugin = { viewModel.deletePlugin(it) },
@@ -425,15 +439,20 @@ fun ShellCraftApp(
                                     forgeState = forgeState,
                                     llmConfig = llmConfig,
                                     connectionState = connectionState,
+                                    defaultGuiStyle = securitySettings.defaultForgeGuiStyle,
                                     onDeviceStatus = onDeviceStatus,
-                                    onAnalyze = { cmd, mode, docs, bypass ->
-                                        viewModel.startForgeAnalysis(cmd, mode, docs, bypass)
+                                    onAnalyze = { cmd, mode, docs, bypass, guiStyle, customInstr ->
+                                        viewModel.startForgeAnalysis(cmd, mode, docs, bypass, guiStyle, customInstr)
                                     },
                                     onCancelAnalysis = { viewModel.cancelForgeAnalysis() },
                                     onSaveAndOpenPlugin = { plugin ->
                                         viewModel.savePlugin(plugin)
                                         viewModel.resetForge()
                                         navController.navigate(PluginRunnerRoute(plugin.id))
+                                    },
+                                    onUpdateReadyPlugin = { updated -> viewModel.updateReadyForgePlugin(updated) },
+                                    onRequestAiRefinement = { current, history, instruction, rawDocs ->
+                                        viewModel.refinePluginWithChat(current, history, instruction, rawDocs)
                                     },
                                     onResetForge = { viewModel.resetForge() }
                                 )

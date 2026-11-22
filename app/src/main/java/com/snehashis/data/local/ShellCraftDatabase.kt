@@ -5,9 +5,13 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import com.snehashis.domain.model.CliPlugin
+import com.snehashis.domain.model.OutputRowAction
 import com.snehashis.domain.model.ParameterType
+import com.snehashis.domain.model.ParameterWidget
 import com.snehashis.domain.model.PluginAction
+import com.snehashis.domain.model.PluginGuiStyle
 import com.snehashis.domain.model.PluginParameter
+import com.snehashis.domain.model.PluginPreset
 import com.snehashis.domain.model.PluginSource
 import com.snehashis.domain.model.RiskLevel
 import com.snehashis.domain.model.TargetOs
@@ -47,30 +51,58 @@ object SeedPlugins {
     }
 
     fun initialEntities(): List<PluginEntity> {
-        return starterPlugins().map { plugin ->
-            PluginEntity(
-                id = plugin.id,
-                commandName = plugin.commandName,
-                displayName = plugin.displayName,
-                category = plugin.category,
-                source = plugin.source.name,
-                updatedAtEpochMs = plugin.updatedAtEpochMs,
-                pluginJson = json.encodeToString(plugin)
-            )
-        }
+        return starterPlugins().map { toEntity(it) }
     }
+
+    fun toEntity(plugin: CliPlugin): PluginEntity = PluginEntity(
+        id = plugin.id,
+        commandName = plugin.commandName,
+        displayName = plugin.displayName,
+        category = plugin.category,
+        source = plugin.source.name,
+        updatedAtEpochMs = plugin.updatedAtEpochMs,
+        pluginJson = json.encodeToString(plugin)
+    )
 
     fun starterPlugins(): List<CliPlugin> = listOf(
         CliPlugin(
+            schemaVersion = "shellcraft.plugin.v2",
             id = "builtin-systemctl",
             commandName = "systemctl",
             displayName = "Systemd Service Control",
-            description = "Inspect, start, restart, or stop POSIX systemd units and daemon health.",
+            description = "Inspect, start, restart, or stop POSIX systemd units with one-tap row actions.",
             category = "System",
             targetOs = TargetOs.LINUX,
-            version = "1.0.0",
+            version = "2.0.0",
             author = "ShellCraft Core",
             source = PluginSource.BUILT_IN,
+            uiMode = PluginGuiStyle.MODULAR_DASHBOARD,
+            presets = listOf(
+                PluginPreset(
+                    id = "failed_audit",
+                    label = "Audit Failed Units",
+                    description = "Find broken services immediately",
+                    actionId = "list_failed",
+                    values = mapOf("failed" to "true", "no_pager" to "true"),
+                    iconName = "warning"
+                ),
+                PluginPreset(
+                    id = "ssh_health",
+                    label = "Check SSHD",
+                    description = "Inspect ssh service + 30 log lines",
+                    actionId = "status",
+                    values = mapOf("unit" to "ssh", "lines" to "30", "no_pager" to "true"),
+                    iconName = "bolt"
+                ),
+                PluginPreset(
+                    id = "nginx_health",
+                    label = "Check Nginx",
+                    description = "Inspect nginx web daemon",
+                    actionId = "status",
+                    values = mapOf("unit" to "nginx", "lines" to "40", "no_pager" to "true"),
+                    iconName = "speed"
+                )
+            ),
             actions = listOf(
                 PluginAction(
                     id = "status",
@@ -88,28 +120,56 @@ object SeedPlugins {
                             positionalIndex = 0,
                             required = true,
                             defaultValue = "ssh",
-                            placeholder = "nginx.service"
+                            placeholder = "nginx.service",
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "lines",
-                            label = "Log Lines",
+                            label = "Log Tail Lines",
                             type = ParameterType.NUMBER,
                             flag = "-n",
-                            defaultValue = "20"
+                            defaultValue = "30",
+                            widget = ParameterWidget.SLIDER,
+                            minValue = 5f,
+                            maxValue = 200f,
+                            stepValue = 5f,
+                            unitLabel = "lines",
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "no_pager",
                             label = "Disable Pager",
                             type = ParameterType.BOOLEAN_FLAG,
                             flag = "--no-pager",
-                            defaultValue = "true"
+                            defaultValue = "true",
+                            group = "Advanced"
+                        )
+                    ),
+                    rowActions = listOf(
+                        OutputRowAction(
+                            id = "restart_unit",
+                            label = "Restart",
+                            targetActionId = "restart",
+                            paramMappings = mapOf("unit" to "{unit}"),
+                            iconName = "refresh",
+                            riskLevel = RiskLevel.MODERATE,
+                            requiresSudo = true
+                        ),
+                        OutputRowAction(
+                            id = "stop_unit",
+                            label = "Stop",
+                            targetActionId = "stop",
+                            paramMappings = mapOf("unit" to "{unit}"),
+                            iconName = "stop",
+                            riskLevel = RiskLevel.HIGH,
+                            requiresSudo = true
                         )
                     )
                 ),
                 PluginAction(
                     id = "list_failed",
                     label = "Failed Units",
-                    description = "List all failed systemd units on the host.",
+                    description = "List active or failed systemd units with inline drill-down controls.",
                     subcommand = "list-units",
                     riskLevel = RiskLevel.SAFE,
                     requiresSudo = false,
@@ -119,14 +179,36 @@ object SeedPlugins {
                             label = "Only Failed",
                             type = ParameterType.BOOLEAN_FLAG,
                             flag = "--failed",
-                            defaultValue = "true"
+                            defaultValue = "true",
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "no_pager",
                             label = "Disable Pager",
                             type = ParameterType.BOOLEAN_FLAG,
                             flag = "--no-pager",
-                            defaultValue = "true"
+                            defaultValue = "true",
+                            group = "Advanced"
+                        )
+                    ),
+                    rowActions = listOf(
+                        OutputRowAction(
+                            id = "inspect_unit",
+                            label = "Inspect",
+                            targetActionId = "status",
+                            paramMappings = mapOf("unit" to "{col:0}"),
+                            iconName = "info",
+                            riskLevel = RiskLevel.SAFE,
+                            requiresSudo = false
+                        ),
+                        OutputRowAction(
+                            id = "restart_row_unit",
+                            label = "Restart",
+                            targetActionId = "restart",
+                            paramMappings = mapOf("unit" to "{col:0}"),
+                            iconName = "refresh",
+                            riskLevel = RiskLevel.MODERATE,
+                            requiresSudo = true
                         )
                     )
                 ),
@@ -169,20 +251,46 @@ object SeedPlugins {
             )
         ),
         CliPlugin(
+            schemaVersion = "shellcraft.plugin.v2",
             id = "builtin-docker",
             commandName = "docker",
             displayName = "Docker Engine",
-            description = "Inspect running containers, tail container logs, and prune unused assets.",
+            description = "Inspect containers, launch per-container logs or restarts directly from output rows, and prune safely.",
             category = "Containers",
             targetOs = TargetOs.POSIX,
-            version = "1.0.0",
+            version = "2.0.0",
             author = "ShellCraft Core",
             source = PluginSource.BUILT_IN,
+            uiMode = PluginGuiStyle.MODULAR_DASHBOARD,
+            presets = listOf(
+                PluginPreset(
+                    id = "active_containers",
+                    label = "Running Containers",
+                    description = "Compact table of active containers",
+                    actionId = "ps",
+                    values = mapOf(
+                        "all" to "false",
+                        "format" to "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
+                    ),
+                    iconName = "bolt"
+                ),
+                PluginPreset(
+                    id = "all_containers",
+                    label = "All + Exited",
+                    description = "Include stopped containers & image IDs",
+                    actionId = "ps",
+                    values = mapOf(
+                        "all" to "true",
+                        "format" to "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"
+                    ),
+                    iconName = "layers"
+                )
+            ),
             actions = listOf(
                 PluginAction(
                     id = "ps",
                     label = "List Containers",
-                    description = "Show running and optionally stopped containers.",
+                    description = "Show containers with one-tap row buttons to tail logs, restart, or stop.",
                     subcommand = "ps",
                     riskLevel = RiskLevel.SAFE,
                     parameters = listOf(
@@ -191,19 +299,48 @@ object SeedPlugins {
                             label = "Include Stopped (-a)",
                             type = ParameterType.BOOLEAN_FLAG,
                             flag = "-a",
-                            defaultValue = "true"
+                            defaultValue = "true",
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "format",
-                            label = "Output Format",
+                            label = "Table Columns",
                             type = ParameterType.SELECT_ENUM,
                             flag = "--format",
                             defaultValue = "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}",
                             options = listOf(
                                 "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}",
-                                "json",
-                                "table {{.ID}}\\t{{.Image}}\\t{{.State}}"
-                            )
+                                "table {{.Names}}\\t{{.Image}}\\t{{.Status}}",
+                                "json"
+                            ),
+                            widget = ParameterWidget.SEGMENTED_CHOICE,
+                            group = "Advanced"
+                        )
+                    ),
+                    rowActions = listOf(
+                        OutputRowAction(
+                            id = "container_logs",
+                            label = "Logs",
+                            targetActionId = "logs",
+                            paramMappings = mapOf("container" to "{col:0}", "tail" to "120"),
+                            iconName = "description",
+                            riskLevel = RiskLevel.SAFE
+                        ),
+                        OutputRowAction(
+                            id = "container_restart",
+                            label = "Restart",
+                            targetActionId = "restart_container",
+                            paramMappings = mapOf("container" to "{col:0}"),
+                            iconName = "refresh",
+                            riskLevel = RiskLevel.MODERATE
+                        ),
+                        OutputRowAction(
+                            id = "container_stop",
+                            label = "Stop",
+                            targetActionId = "stop_container",
+                            paramMappings = mapOf("container" to "{col:0}"),
+                            iconName = "stop",
+                            riskLevel = RiskLevel.HIGH
                         )
                     )
                 ),
@@ -215,19 +352,61 @@ object SeedPlugins {
                     riskLevel = RiskLevel.SAFE,
                     parameters = listOf(
                         PluginParameter(
+                            id = "container",
+                            label = "Container Name or ID",
+                            type = ParameterType.TEXT,
+                            positionalIndex = 0,
+                            required = true,
+                            placeholder = "api-gateway",
+                            group = "Primary"
+                        ),
+                        PluginParameter(
                             id = "tail",
-                            label = "Tail Lines",
+                            label = "Tail Depth",
                             type = ParameterType.NUMBER,
                             flag = "--tail",
-                            defaultValue = "100"
+                            defaultValue = "100",
+                            widget = ParameterWidget.SLIDER,
+                            minValue = 20f,
+                            maxValue = 1000f,
+                            stepValue = 20f,
+                            unitLabel = "lines",
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "timestamps",
                             label = "Include Timestamps",
                             type = ParameterType.BOOLEAN_FLAG,
                             flag = "-t",
-                            defaultValue = "true"
-                        ),
+                            defaultValue = "true",
+                            group = "Advanced"
+                        )
+                    )
+                ),
+                PluginAction(
+                    id = "restart_container",
+                    label = "Restart Container",
+                    description = "Restart a container gracefully.",
+                    subcommand = "restart",
+                    riskLevel = RiskLevel.MODERATE,
+                    parameters = listOf(
+                        PluginParameter(
+                            id = "container",
+                            label = "Container Name or ID",
+                            type = ParameterType.TEXT,
+                            positionalIndex = 0,
+                            required = true,
+                            placeholder = "api-gateway"
+                        )
+                    )
+                ),
+                PluginAction(
+                    id = "stop_container",
+                    label = "Stop Container",
+                    description = "Stop a running container.",
+                    subcommand = "stop",
+                    riskLevel = RiskLevel.HIGH,
+                    parameters = listOf(
                         PluginParameter(
                             id = "container",
                             label = "Container Name or ID",
@@ -264,15 +443,35 @@ object SeedPlugins {
             )
         ),
         CliPlugin(
+            schemaVersion = "shellcraft.plugin.v2",
             id = "builtin-journalctl",
             commandName = "journalctl",
             displayName = "Systemd Journal Logs",
-            description = "Query kernel and system service logs with priority and time filtering.",
+            description = "Query kernel & service logs using severity chips and continuous tail sliders.",
             category = "Diagnostics",
             targetOs = TargetOs.LINUX,
-            version = "1.0.0",
+            version = "2.0.0",
             author = "ShellCraft Core",
             source = PluginSource.BUILT_IN,
+            uiMode = PluginGuiStyle.MODULAR_DASHBOARD,
+            presets = listOf(
+                PluginPreset(
+                    id = "critical_errors",
+                    label = "Recent Errors",
+                    description = "Last 80 error-level journal entries",
+                    actionId = "query",
+                    values = mapOf("priority" to "err", "lines" to "80", "no_pager" to "true"),
+                    iconName = "warning"
+                ),
+                PluginPreset(
+                    id = "auth_ssh_logs",
+                    label = "SSH Daemon Logs",
+                    description = "Inspect ssh authentication activity",
+                    actionId = "query",
+                    values = mapOf("unit" to "ssh", "priority" to "info", "lines" to "100", "no_pager" to "true"),
+                    iconName = "lock"
+                )
+            ),
             actions = listOf(
                 PluginAction(
                     id = "query",
@@ -282,98 +481,95 @@ object SeedPlugins {
                     riskLevel = RiskLevel.SAFE,
                     parameters = listOf(
                         PluginParameter(
+                            id = "priority",
+                            label = "Minimum Severity",
+                            type = ParameterType.SELECT_ENUM,
+                            flag = "-p",
+                            defaultValue = "err",
+                            options = listOf("crit", "err", "warning", "notice", "info", "debug"),
+                            widget = ParameterWidget.SEGMENTED_CHOICE,
+                            group = "Primary"
+                        ),
+                        PluginParameter(
+                            id = "lines",
+                            label = "Entry Limit",
+                            type = ParameterType.NUMBER,
+                            flag = "-n",
+                            defaultValue = "60",
+                            widget = ParameterWidget.SLIDER,
+                            minValue = 10f,
+                            maxValue = 500f,
+                            stepValue = 10f,
+                            unitLabel = "lines",
+                            group = "Primary"
+                        ),
+                        PluginParameter(
                             id = "unit",
                             label = "Filter by Unit (-u)",
                             type = ParameterType.TEXT,
                             flag = "-u",
-                            placeholder = "sshd"
-                        ),
-                        PluginParameter(
-                            id = "priority",
-                            label = "Priority Level (-p)",
-                            type = ParameterType.SELECT_ENUM,
-                            flag = "-p",
-                            defaultValue = "err",
-                            options = listOf("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
-                        ),
-                        PluginParameter(
-                            id = "lines",
-                            label = "Lines (-n)",
-                            type = ParameterType.NUMBER,
-                            flag = "-n",
-                            defaultValue = "50"
+                            placeholder = "sshd",
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "no_pager",
                             label = "No Pager",
                             type = ParameterType.BOOLEAN_FLAG,
                             flag = "--no-pager",
-                            defaultValue = "true"
+                            defaultValue = "true",
+                            group = "Advanced"
                         )
                     )
                 )
             )
         ),
         CliPlugin(
+            schemaVersion = "shellcraft.plugin.v2",
             id = "builtin-rsync",
             commandName = "rsync",
             displayName = "Rsync File Transfer",
-            description = "Fast incremental POSIX directory synchronization with dry-run support.",
+            description = "Incremental remote & phone-uploaded file synchronization with interactive SFTP pickers.",
             category = "Files",
             targetOs = TargetOs.POSIX,
-            version = "1.0.0",
+            version = "2.0.0",
             author = "ShellCraft Core",
             source = PluginSource.BUILT_IN,
+            uiMode = PluginGuiStyle.MODULAR_DASHBOARD,
+            presets = listOf(
+                PluginPreset(
+                    id = "safe_dry_run",
+                    label = "Dry-Run Preview",
+                    description = "Simulate sync without modifying destination",
+                    actionId = "sync",
+                    values = mapOf("archive" to "true", "verbose" to "true", "compress" to "true", "dry_run" to "true", "delete" to "false"),
+                    iconName = "shield"
+                ),
+                PluginPreset(
+                    id = "mirror_fast",
+                    label = "Compressed Sync",
+                    description = "Live incremental transfer (-avz)",
+                    actionId = "sync",
+                    values = mapOf("archive" to "true", "verbose" to "true", "compress" to "true", "dry_run" to "false", "delete" to "false"),
+                    iconName = "bolt"
+                )
+            ),
             actions = listOf(
                 PluginAction(
                     id = "sync",
                     label = "Synchronize Directories",
-                    description = "Copy and mirror files incrementally with optional dry-run.",
+                    description = "Copy and mirror files incrementally; use Browse Host or Upload Phone File on paths.",
                     subcommand = "",
                     riskLevel = RiskLevel.MODERATE,
                     parameters = listOf(
-                        PluginParameter(
-                            id = "archive",
-                            label = "Archive Mode (-a)",
-                            type = ParameterType.BOOLEAN_FLAG,
-                            flag = "-a",
-                            defaultValue = "true"
-                        ),
-                        PluginParameter(
-                            id = "verbose",
-                            label = "Verbose (-v)",
-                            type = ParameterType.BOOLEAN_FLAG,
-                            flag = "-v",
-                            defaultValue = "true"
-                        ),
-                        PluginParameter(
-                            id = "compress",
-                            label = "Compress (-z)",
-                            type = ParameterType.BOOLEAN_FLAG,
-                            flag = "-z",
-                            defaultValue = "true"
-                        ),
-                        PluginParameter(
-                            id = "dry_run",
-                            label = "Dry Run (--dry-run)",
-                            type = ParameterType.BOOLEAN_FLAG,
-                            flag = "--dry-run",
-                            defaultValue = "true"
-                        ),
-                        PluginParameter(
-                            id = "delete",
-                            label = "Delete Extraneous Files (--delete)",
-                            type = ParameterType.BOOLEAN_FLAG,
-                            flag = "--delete",
-                            defaultValue = "false"
-                        ),
                         PluginParameter(
                             id = "source",
                             label = "Source Path",
                             type = ParameterType.PATH,
                             positionalIndex = 0,
                             required = true,
-                            placeholder = "/var/www/app/"
+                            placeholder = "/var/www/app/",
+                            widget = ParameterWidget.FILE_PATH,
+                            group = "Primary"
                         ),
                         PluginParameter(
                             id = "destination",
@@ -381,7 +577,49 @@ object SeedPlugins {
                             type = ParameterType.PATH,
                             positionalIndex = 1,
                             required = true,
-                            placeholder = "/backup/app/"
+                            placeholder = "/backup/app/",
+                            widget = ParameterWidget.FILE_PATH,
+                            group = "Primary"
+                        ),
+                        PluginParameter(
+                            id = "dry_run",
+                            label = "Dry Run (--dry-run)",
+                            type = ParameterType.BOOLEAN_FLAG,
+                            flag = "--dry-run",
+                            defaultValue = "true",
+                            group = "Primary"
+                        ),
+                        PluginParameter(
+                            id = "archive",
+                            label = "Archive Mode (-a)",
+                            type = ParameterType.BOOLEAN_FLAG,
+                            flag = "-a",
+                            defaultValue = "true",
+                            group = "Advanced"
+                        ),
+                        PluginParameter(
+                            id = "verbose",
+                            label = "Verbose (-v)",
+                            type = ParameterType.BOOLEAN_FLAG,
+                            flag = "-v",
+                            defaultValue = "true",
+                            group = "Advanced"
+                        ),
+                        PluginParameter(
+                            id = "compress",
+                            label = "Compress (-z)",
+                            type = ParameterType.BOOLEAN_FLAG,
+                            flag = "-z",
+                            defaultValue = "true",
+                            group = "Advanced"
+                        ),
+                        PluginParameter(
+                            id = "delete",
+                            label = "Delete Extraneous Files (--delete)",
+                            type = ParameterType.BOOLEAN_FLAG,
+                            flag = "--delete",
+                            defaultValue = "false",
+                            group = "Advanced"
                         )
                     )
                 )
